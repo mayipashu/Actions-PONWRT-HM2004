@@ -305,8 +305,10 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
     #      （MIB31 == 0xCCCCCCCC 轮询 + 重试 + 回填 fw_version）
     #      编号必须 > 941-01：后者也改版本查询块，942 生成时已基于
     #      400+941-01 的树，应用顺序 400 → 9xx → 942
+    # 943: 邮箱命令必须在门铃之前写入（固件 ISR 读 CTRL3 判断是否等待）
     for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
-              942-net-airoha-npu-wait-for-firmware-bringup; do
+              942-net-airoha-npu-wait-for-firmware-bringup \
+              943-net-airoha-npu-command-before-doorbell; do
       if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
         cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
         echo "✅ 内核补丁已注入：$pn"
