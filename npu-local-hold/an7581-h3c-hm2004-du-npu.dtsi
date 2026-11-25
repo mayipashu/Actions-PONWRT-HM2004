@@ -63,4 +63,13 @@
 
 	memory-region = <&npu_binary>, <&npu_pkt>, <&npu_ba>;
 	memory-region-names = "binary", "pkt", "ba";
+
+	/*
+	 * ClankerNPU 现编的 AN7581+MT7916(kite) 固件。
+	 * 上游驱动内置名 en7581_npu_rv32.bin 是 MT7992 通用版，
+	 * 不含 kite 数据通路，必须显式指定这一对。
+	 * data 进 NPU 局部 SRAM，rv32 进 npu-binary 区。
+	 */
+	firmware-name = "airoha/en7581_MT7916_npu_rv32.bin",
+			"airoha/en7581_MT7916_npu_data.bin";
 };

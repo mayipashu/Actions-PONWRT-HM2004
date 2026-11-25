@@ -1,12 +1,17 @@
 From: mayipashu <mayipashu@users.noreply.github.com>
-Date: Wed, 19 Nov 2026 18:00:00 +0800
+Date: Tue, 25 Nov 2026 09:00:00 +0800
 Subject: [PATCH] mt7915: add NPU receive offload for PCIe MT7915/MT7916
 
 Port the NPU receive transport from Sirherobrine23/mt76 (branch
 npu_en7523, commit 532416f) onto the current mt76 baseline, adapted for
-EN7581.
+EN7581 and for the open-source ClankerNPU firmware.
 
-Adaptations required before the code applies here:
+The transport is written against the ClankerNPU host descriptor layout
+(24-byte entries, buffer address in word 3), which the firmware's
+npu_hostadpt.c produces, so it pairs with images built from
+ClankerConstruction/ClankerNPU (SOC=AN7581 WIFI=MT7916).
+
+Adaptations required here:
 
   - The host bridge parent node is "pcie@0,0" whose reg window is empty
     (all zeros) on EN7581; the controller "pcie@<addr>" is one level up
@@ -15,21 +20,17 @@ Adaptations required before the code applies here:
   - EN7581 maps its PCIe controllers at 0x1fc0/0x1fc2 000 rather than the
     EN7523 0x1fa9{1,2}000 the fork assumes. Accept both pairs and extend
     the P0/P1 port mapping.
-  - The AIROHA_NPU_WLAN_MT7915/_DBDC/_MT7916 chip-model enum is only used
-    in the fork but never defined (it depends on an out-of-tree airoha
-    header). Define it locally with the vendor BSP numbering and expose a
-    mt7915_npu_model module parameter so the value can be overridden at
-    runtime.
+  - WLAN_FUNC_SET_WAIT_DRIVER_MODEL carries a *model class*, not a chip
+    id: the firmware allows offload for any non-zero value and puts both
+    bands on core 1 (DBDC) only for 1 or 2. Use 1 for this DBDC radio and
+    keep the mt7915_npu_model parameter for runtime override.
   - The openwrt airoha PPE backend exposes only check_skb(), not the
     reason-aware check_skb_reason() variant the fork prefers, so the
     reason path is dropped and the common check_skb branch is used.
   - The fork's main.c targets a newer mac80211 API and cannot be taken
-    wholesale. The NPU hooks are added surgically instead: station
-    alloc/remove cleanup, RX BA start/stop authorization, key-change BA
-    reset, and a sta_state wrapper tracking AUTHORIZED transitions.
+    wholesale. The NPU hooks are added surgically instead.
   - mt7915_npu_init() returning -EOPNOTSUPP (unsupported board) must not
-    abort mt7915_dma_init(): fall back to CPU forwarding instead, so Wi-Fi
-    keeps working even when the NPU transport is unavailable.
+    abort mt7915_dma_init(): fall back to CPU forwarding.
 
 When the transport is active the NPU owns the Wi-Fi data RX rings: their
 completion interrupts are masked and the RX queues are allocated through
@@ -385,7 +386,7 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 +	default n
 --- /dev/null
 +++ b/mt7915/npu.c
-@@ -0,0 +1,805 @@
+@@ -0,0 +1,813 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* Airoha legacy NPU receive transport for PCIe MT7915/MT7916 radios. */
 +#include <linux/debugfs.h>
@@ -406,10 +407,18 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 + * if the firmware expects a different encoding.
 + */
 +#ifndef AIROHA_NPU_WLAN_MT7915
++/*
++ * Value sent via WLAN_FUNC_SET_WAIT_DRIVER_MODEL. The ClankerNPU firmware
++ * decides two things from it (npu_wifi_init.c):
++ *   wifi_get_band_cap(): model != 0 -> WiFi offload allowed
++ *   wifi_get_dbdc_mode(): model 1 or 2 -> both bands on core 1 (DBDC)
++ * Our MT7916 is a DBDC radio, so it must be 1 or 2, not a chip id.
++ * Override with the mt7915_npu_model parameter to try the other value.
++ */
 +enum airoha_npu_wlan_chip {
-+	AIROHA_NPU_WLAN_MT7915		= 4,
-+	AIROHA_NPU_WLAN_MT7915_DBDC	= 0x12,
-+	AIROHA_NPU_WLAN_MT7916		= 0x13,
++	AIROHA_NPU_WLAN_MT7915		= 0,	/* chip-table mode, 2.4G on core 2 */
++	AIROHA_NPU_WLAN_MT7915_DBDC	= 1,
++	AIROHA_NPU_WLAN_MT7916		= 1,	/* MT7916 on this board is DBDC */
 +};
 +#endif
 +
