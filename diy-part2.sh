@@ -301,10 +301,12 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   #   把 NPU_LEGACY_ABI=true 打开才会注入它。
   if [ -d "$KPATCH_DIR" ]; then
     # 400: TX 内存区可选（kite 只要 pkt + ba）
-    # 403: 等 ClankerNPU 固件 bring-up 完成再查版本
-    #      （MIB31 == 0xCCCCCCCC 轮询 + 重试，仅对带 firmware-name 的板）
+    # 942: 等 ClankerNPU 固件 bring-up 完成再查版本
+    #      （MIB31 == 0xCCCCCCCC 轮询 + 重试 + 回填 fw_version）
+    #      编号必须 > 941-01：后者也改版本查询块，942 生成时已基于
+    #      400+941-01 的树，应用顺序 400 → 9xx → 942
     for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
-              403-net-airoha-npu-wait-for-firmware-bringup; do
+              942-net-airoha-npu-wait-for-firmware-bringup; do
       if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
         cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
         echo "✅ 内核补丁已注入：$pn"
