@@ -3,6 +3,8 @@
 # 按本机接口表适配：去掉 dae0/tun0（无），加入 easytier/n2n/tinc（本机在用）
 # fttr0-16 不加 RPS：FTTR 下行口走 PPE 硬件转发，软 RPS 反而增加开销
 [ "$ACTION" = "add" ] || [ "$ACTION" = "bind" ] || [ "$ACTION" = "ifup" ] || exit 0
+# 默认关闭：与 packet_steering 服务抢 RPS 设置，实测无收益
+[ -e /etc/npu-affinity.enable ] || exit 0
 
 dev="${DEVICENAME:-$INTERFACE}"
 case "$dev" in
