@@ -365,6 +365,8 @@ fi
 # cwd = OpenWrt 根，files/ 是 workflow 步骤 6 已拷贝的 overlay
 [ -d "files/etc/hotplug.d/net" ] && \
   chmod +x files/etc/hotplug.d/net/* 2>/dev/null || true
+[ -d "files/etc/init.d" ] && \
+  chmod +x files/etc/init.d/* 2>/dev/null || true
 [ -f "files/usr/sbin/pin-wifi-cpus.sh" ] && \
   chmod +x files/usr/sbin/pin-wifi-cpus.sh 2>/dev/null || true
 
