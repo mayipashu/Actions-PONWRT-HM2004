@@ -151,6 +151,25 @@ if [ "$ADD_FTTR" = "true" ] && [ "$FTTR_PROFILE" = "h3c_hm2004-du" ]; then
     exit 1
   fi
 
+  # ---------------------------------------------------------
+  # 本地补丁：新版 fttrd 对 FPGA GPON 控制寄存器做严格回读校验，
+  # 而 FMCS 在 PLOAM 活动期间会自置 bit0，导致
+  #   GPON control readback mismatch: wanted 0x2, got 0x3
+  # 随后 fail_closed 把光口永久关闭（LuCI 显示
+  #   optical state is unconfirmed; ... explicit reload required）。
+  # 补丁只比较本函数拥有的 TX/FEC 两位，其余位留给硬件。
+  # ---------------------------------------------------------
+  FTTR_FIX_PATCH="$GITHUB_WORKSPACE/patches/fttr/0001-fmcs-only-compare-owned-gpon-control-bits.patch"
+  if [ -f "$FTTR_FIX_PATCH" ]; then
+    if patch -p1 -s -d "$FTTR_FEED_TMP" < "$FTTR_FIX_PATCH"; then
+      echo "✅ FTTR GPON 控制位校验补丁已应用"
+    else
+      echo "::warning::FTTR 补丁应用失败（上游可能已改），继续构建未打补丁的版本"
+    fi
+  else
+    echo "::warning::未找到 FTTR 补丁：$FTTR_FIX_PATCH"
+  fi
+
   # openwrt-fttr 硬 include 了 feeds/packages/lang/rust/rust-package.mk，
   # 这个文件不在的话 dump 直接失败、包静默不进索引。
   # 与其等到 defconfig 把它剔掉才发现，不如在这里就报错退出。
