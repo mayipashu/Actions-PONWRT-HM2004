@@ -1,0 +1,93 @@
+From: mayipashu <mayipashu@users.noreply.github.com>
+Date: Tue, 25 Nov 2026 22:10:00 +0800
+Subject: [PATCH] net: airoha: npu: wait for firmware bring-up before the
+ version query
+
+The ClankerNPU firmware brings itself up from inside the RISC-V image:
+it pulses the SCU reset, initialises PLIC, its own console and the timer,
+then waits for every hart to sync before it answers the mailbox. On a
+cold boot that takes noticeably longer than the 100 ms the driver sleeps
+after releasing the harts plus the 100 ms mailbox timeout, so the
+one-shot version query times out and is never retried. The NPU looks
+dead even though it finished initialising.
+
+Observed on H3C HM2004-DU (AN7581 + MT7916): the host console showed no
+"NPU fw version" line at all, while MIB31 read back 0xCCCCCCCC
+(INIT_COMPLETE), i.e. the firmware was up and healthy.
+
+Poll MIB31 for the completion signature before querying, then retry the
+query a few times. Both steps are limited to boards that pin an image
+through "firmware-name", so the generic image keeps its old timing. The
+signature is ClankerNPU specific, so a poll timeout is not fatal, and a
+final warning replaces the silent failure.
+
+Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_npu.c
++++ b/drivers/net/ethernet/airoha/airoha_npu.c
+@@ -46,6 +46,16 @@
+ #define REG_CR_MBQ8_CTRL(_n)		(NPU_MBOX_BASE_ADDR + 0x0b0 + ((_n) << 2))
+ #define REG_CR_NPU_MIB(_n)		(NPU_MBOX_BASE_ADDR + 0x140 + ((_n) << 2))
+ 
++/*
++ * ClankerNPU writes this signature to MIB31 once its bring-up finished.
++ * MIB31 is the last register of the NPU parameter block.
++ */
++#define NPU_BOOT_SIGNATURE_REG		REG_CR_NPU_MIB(31)
++#define NPU_BOOT_SIGNATURE_COMPLETE	0xcccccccc
++#define NPU_BOOT_POLL_RETRIES		20	/* 20 * 100 ms = 2 s */
++#define NPU_BOOT_POLL_INTERVAL_MS	100
++#define NPU_VERSION_RETRIES		5	/* 5 * 100 ms = 500 ms */
++
+ #define NPU_WLAN_BASE_ADDR		0x30d000
+ 
+ #define REG_IRQ_STATUS			(NPU_WLAN_BASE_ADDR + 0x030)
+@@ -797,10 +807,44 @@
+ 	regmap_write(npu->regmap, REG_CR_BOOT_TRIGGER, 0x1);
+ 	msleep(100);
+ 
+-	if (!airoha_npu_wlan_msg_get(npu, 0, WLAN_FUNC_GET_WAIT_NPU_VERSION,
+-				     &val, sizeof(val), GFP_KERNEL))
+-		dev_info(dev, "NPU fw version: %0d.%d\n",
+-			 (val >> 16) & 0xffff, val & 0xffff);
++	/*
++	 * The firmware needs a moment to bring itself up: it pulses the SCU
++	 * reset, initialises PLIC, its console and the timer, and waits for
++	 * every hart to sync. A bare 100 ms mailbox timeout is not enough on
++	 * a cold boot, and a single failed query is not retried, so the
++	 * version was lost and the NPU looked dead even though it had
++	 * finished initialising (MIB31 == 0xCCCCCCCC).
++	 *
++	 * Poll the firmware's completion signature first, then query the
++	 * version with a few retries. The signature is ClankerNPU specific,
++	 * so a timeout is not fatal: firmware that never writes it still
++	 * gets its query attempts.
++	 */
++	if (of_find_property(dev->of_node, "firmware-name", NULL)) {
++		for (i = 0; i < NPU_BOOT_POLL_RETRIES; i++) {
++			u32 sig = 0;
++
++			if (!regmap_read(npu->regmap,
++					 NPU_BOOT_SIGNATURE_REG, &sig) &&
++			    sig == NPU_BOOT_SIGNATURE_COMPLETE)
++				break;
++			msleep(NPU_BOOT_POLL_INTERVAL_MS);
++		}
++	}
++
++	for (i = 0; i < NPU_VERSION_RETRIES; i++) {
++		if (!airoha_npu_wlan_msg_get(npu, 0,
++					     WLAN_FUNC_GET_WAIT_NPU_VERSION,
++					     &val, sizeof(val), GFP_KERNEL)) {
++			dev_info(dev, "NPU fw version: %0d.%d\n",
++				 (val >> 16) & 0xffff, val & 0xffff);
++			break;
++		}
++		msleep(NPU_BOOT_POLL_INTERVAL_MS);
++	}
++
++	if (i == NPU_VERSION_RETRIES)
++		dev_warn(dev, "NPU firmware did not answer the version query\n");
+ 
+ 	platform_set_drvdata(pdev, npu);
+ 

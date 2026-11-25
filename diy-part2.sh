@@ -300,13 +300,18 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   #   只有在 step 1 证明「通用固件不认 WLAN 命令」之后，
   #   把 NPU_LEGACY_ABI=true 打开才会注入它。
   if [ -d "$KPATCH_DIR" ]; then
-    pn=400-net-airoha-npu-support-wlan-rx-only-offload
-    if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
-      cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
-      echo "✅ 内核补丁已注入：$pn"
-    else
-      echo "::warning::内核补丁缺失：$pn.patch"
-    fi
+    # 400: TX 内存区可选（kite 只要 pkt + ba）
+    # 403: 等 ClankerNPU 固件 bring-up 完成再查版本
+    #      （MIB31 == 0xCCCCCCCC 轮询 + 重试，仅对带 firmware-name 的板）
+    for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
+              403-net-airoha-npu-wait-for-firmware-bringup; do
+      if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
+        cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
+        echo "✅ 内核补丁已注入：$pn"
+      else
+        echo "::warning::内核补丁缺失：$pn.patch"
+      fi
+    done
 
     if [ "${NPU_LEGACY_ABI:-false}" = "true" ]; then
       pn=401-net-airoha-npu-legacy-bsp-abi
