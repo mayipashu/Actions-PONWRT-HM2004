@@ -1,41 +1,35 @@
 From: mayipashu <mayipashu@users.noreply.github.com>
-Date: Tue, 25 Nov 2026 09:00:00 +0800
-Subject: [PATCH] mt7915: add NPU receive offload for PCIe MT7915/MT7916
+Date: Tue, 25 Nov 2026 20:00:00 +0800
+Subject: [PATCH] mt7915: NPU receive offload for PCIe MT7915/MT7916 (opt-in)
 
 Port the NPU receive transport from Sirherobrine23/mt76 (branch
-npu_en7523, commit 532416f) onto the current mt76 baseline, adapted for
-EN7581 and for the open-source ClankerNPU firmware.
+npu_en7523) onto the current mt76 baseline, adapted for EN7581 and for
+the open-source ClankerNPU firmware (ClankerConstruction/ClankerNPU,
+SOC=AN7581 WIFI=MT7916), whose host descriptor layout (24-byte entries,
+buffer address in word 3) this transport matches.
 
-The transport is written against the ClankerNPU host descriptor layout
-(24-byte entries, buffer address in word 3), which the firmware's
-npu_hostadpt.c produces, so it pairs with images built from
-ClankerConstruction/ClankerNPU (SOC=AN7581 WIFI=MT7916).
+Safety and correctness fixes over the fork:
 
-Adaptations required here:
-
+  - opt-in master switch: mt7915_npu_enable defaults to 0. Letting the
+    NPU own the Wi-Fi RX rings is all-or-nothing, and during bring-up on
+    H3C HM2004-DU a wrong port type took both bands down completely.
+    With the switch off mt7915_npu_init() returns -EOPNOTSUPP, the RX
+    interrupts stay with the driver and Wi-Fi is untouched.
+  - PCIe port type: AN758x uses the mt7996 convention (domain 0 -> 2,
+    domain 1 -> 3). The fork's P0/P1 = 0/1 is EN7523 numbering and
+    reprograms the wrong inbound window on this SoC. Overridable with
+    mt7915_npu_port for experiments.
   - The host bridge parent node is "pcie@0,0" whose reg window is empty
-    (all zeros) on EN7581; the controller "pcie@<addr>" is one level up
-    and carries the real register range. Walk up when the bridge node
-    has no usable reg.
-  - EN7581 maps its PCIe controllers at 0x1fc0/0x1fc2 000 rather than the
-    EN7523 0x1fa9{1,2}000 the fork assumes. Accept both pairs and extend
-    the P0/P1 port mapping.
-  - WLAN_FUNC_SET_WAIT_DRIVER_MODEL carries a *model class*, not a chip
-    id: the firmware allows offload for any non-zero value and puts both
-    bands on core 1 (DBDC) only for 1 or 2. Use 1 for this DBDC radio and
-    keep the mt7915_npu_model parameter for runtime override.
-  - The openwrt airoha PPE backend exposes only check_skb(), not the
-    reason-aware check_skb_reason() variant the fork prefers, so the
-    reason path is dropped and the common check_skb branch is used.
-  - The fork's main.c targets a newer mac80211 API and cannot be taken
-    wholesale. The NPU hooks are added surgically instead.
-  - mt7915_npu_init() returning -EOPNOTSUPP (unsupported board) must not
-    abort mt7915_dma_init(): fall back to CPU forwarding.
-
-When the transport is active the NPU owns the Wi-Fi data RX rings: their
-completion interrupts are masked and the RX queues are allocated through
-mt7915_npu_rx_ring() so descriptors live in NPU memory. Reordered frames
-then enter the PPE directly instead of travelling through the host CPU.
+    on EN7581; walk up to the controller node that carries the range.
+  - Accept the EN7581 controller addresses 0x1fc0/0x1fc2 000.
+  - WLAN_FUNC_SET_WAIT_DRIVER_MODEL carries a model class, not a chip id:
+    the firmware allows offload for any non-zero value and only puts both
+    bands on one core for 1 or 2. Use 1 for this DBDC radio; override with
+    mt7915_npu_model.
+  - Drop the reason-aware PPE callback (not in the openwrt backend) and
+    keep the common check_skb path.
+  - The fork's main.c targets a newer mac80211 API, so the NPU hooks are
+    added surgically to the existing file.
 
 Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 ---
@@ -386,7 +380,7 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 +	default n
 --- /dev/null
 +++ b/mt7915/npu.c
-@@ -0,0 +1,813 @@
+@@ -0,0 +1,846 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* Airoha legacy NPU receive transport for PCIe MT7915/MT7916 radios. */
 +#include <linux/debugfs.h>
@@ -506,7 +500,29 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 +static int mt7915_npu_model = -1;
 +module_param(mt7915_npu_model, int, 0644);
 +MODULE_PARM_DESC(mt7915_npu_model,
-+		 "Override NPU WLAN chip model (4=MT7915, 0x12=MT7915 DBDC, 0x13=MT7916)");
++		 "Override NPU WLAN chip model (1 or 2 = DBDC, 0 = chip-table mode)");
++
++/*
++ * Master switch, off by default.
++ *
++ * Letting the NPU own the Wi-Fi RX rings is all-or-nothing: with a wrong
++ * PCIe port type the firmware reprograms the wrong inbound window and the
++ * radio stops working entirely (both bands failed to associate during
++ * bring-up on H3C HM2004-DU). Keep it opt-in so a bad NPU setup can never
++ * take Wi-Fi down on a normal boot.
++ *
++ * Enable: /etc/modules.d/… listing "mt7915e … mt7915_npu_enable=1", or at
++ * runtime with a module reload.
++ */
++static int mt7915_npu_enable;
++module_param(mt7915_npu_enable, int, 0644);
++MODULE_PARM_DESC(mt7915_npu_enable,
++		 "1 = let the NPU own the Wi-Fi RX rings (default 0)");
++
++static int mt7915_npu_port = -1;
++module_param(mt7915_npu_port, int, 0644);
++MODULE_PARM_DESC(mt7915_npu_port,
++		 "Override PCIe port type (2/3 on AN758x, 0/1 on EN7523)");
 +
 +/* The legacy firmware exposes one BA spill pool for both channels. */
 +static void *mt7915_npu_ba_pool;
@@ -797,6 +813,9 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 +int mt7915_npu_init(struct mt7915_dev *dev)
 +{
 +	struct device *device = dev->mt76.dev;
++
++	if (!mt7915_npu_enable)
++		return -EOPNOTSUPP;
 +	struct mt7915_npu *priv;
 +	struct airoha_npu *npu;
 +	struct pci_host_bridge *bridge;
@@ -839,8 +858,16 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 +		err = -ENOMEM;
 +		goto put_npu;
 +	}
-+	/* The vendor mailbox uses P0 = 0 and P1 = 1. */
-+	priv->port = res.start == 0x1fa92000 || res.start == 0x1fc20000;
++	/*
++	 * AN758x follows the mt7996 convention: PCI domain 0 -> 2,
++	 * domain 1 -> 3. Sirherobrine23's P0/P1 = 0/1 pair is EN7523
++	 * numbering; on this board it reprograms the wrong inbound window
++	 * and both bands lose association. Override with mt7915_npu_port.
++	 */
++	priv->port = pci_domain_nr(to_pci_dev(device)->bus) ? 3 : 2;
++	if (mt7915_npu_port >= 0)
++		priv->port = mt7915_npu_port;
++
 +	priv->model = model;
 +	priv->band_mask = dev->dbdc_support ? GENMASK(1, 0) :
 +			  BIT(dev->phy.mt76->band_idx);
