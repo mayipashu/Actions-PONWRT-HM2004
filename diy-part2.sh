@@ -292,15 +292,19 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   KPATCH_DIR="target/linux/airoha/patches-${KVER}"
   # 内核补丁：400（RX-only 内存区可选）+ 943（门铃写入顺序，两者不同区可共存）。
   #
-  # ⚠ 401（legacy BSP ABI，MT7916 专用固件必须）与 942（等 firmware
-  #   bring-up）【互斥】——同一版本查询块基线不同（401 期望无 fw_version
-  #   字段的旧块，942 期望 941-01 之后带 fw_version 的新块），同时注入
-  #   必然 quilt 应用失败。两者都只影响 legacy ClankerNPU 固件场景：
-  #     · 401 在 legacy_abi 时直接跳过版本查询（goto version_check），
-  #       942 的 MIB31 轮询+重试是死代码 → legacy 模式不注入 942
-  #     · 非 legacy 模式不注入 401（保持上游 mainline boot）
-  #   941-01（ppe-fixes）也改版本查询块，与 401/942 基线各异，
-  #   见下方 NPU_LEGACY_ABI 分支的排除逻辑。
+  # 2026-11-26 实机结论（用 devmem 手工复现驱动启动序列）：
+  #   MT7916（ClankerNPU）固件【不】需要 legacy ABI，但【必须】拿到
+  #   MIB10 + BOOT_BASE + BOOT_CONFIG=0xff + TRIGGER 0->1 脉冲：
+  #     · 只给脉冲、不给 MIB10/BOOT_BASE（401 legacy 路径）→ 四核 PC 全 0，
+  #       固件根本没跑起来；
+  #     · 给全主线参数 → 1 秒后 MIB31=0xcccccccc，核 PC 落在固件镜像内；
+  #     · 此时手搓 WLAN_FUNC_GET_WAIT_NPU_VERSION 立即回 DONE、status=0。
+  #   即邮箱/消息布局双方一致，之前「固件不应答」是【启动时序】问题：
+  #   驱动在脉冲后 100ms 就查版本，固件还没完成 bring-up。
+  #
+  # 因此：401 legacy 路径废弃（保留补丁文件与开关，默认不注入），
+  #       非 legacy 注入 404（等 MIB31 签名 + 版本查询重试）。
+  #       942 与 404 改同一段代码，二者只注入其一。
   if [ -d "$KPATCH_DIR" ]; then
     # 943: 邮箱命令必须在门铃之前写入（固件 ISR 读 CTRL3 判断是否等待）
     for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
@@ -314,25 +318,24 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
     done
 
     if [ "${NPU_LEGACY_ABI:-false}" = "true" ]; then
-      # 401: MT7916 专用固件（en7581_MT7916_npu_*.bin）是 legacy ABI，
-      #      必须用 BOOT_CONFIG=0 + TRIGGER 0->1 脉冲启动、跳过
-      #      MIB/BOOT_BASE 配置与版本握手。缺它时驱动走 mainline boot，
-      #      legacy 固件起不来 → NPU RX 全断、WiFi 客户端 0 关联（实测）。
+      # 401: 只发 BOOT_CONFIG=0 + TRIGGER 脉冲、跳过 MIB/BOOT_BASE。
+      #      2026-11-26 实测：MT7916 固件因此完全起不来（四核 PC=0），
+      #      保留仅为可复现对照实验，正常构建不要打开。
       pn=401-net-airoha-npu-legacy-bsp-abi
       if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
         cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
-        echo "⚠ 已注入 legacy ABI 补丁：$pn（legacy boot + 跳过版本查询）"
+        echo "⚠ 已注入 legacy ABI 补丁：$pn（实验对照：固件不会启动）"
       fi
     else
-      # 非 legacy：照常注入 942（等 bring-up + 查版本回填 fw_version）
-      pn=942-net-airoha-npu-wait-for-firmware-bringup
+      # 非 legacy：404 等 MIB31 bring-up 签名 + 版本查询重试
+      pn=404-net-airoha-npu-wait-for-firmware-bringup
       if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
         cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
-        echo "✅ 内核补丁已注入：$pn"
+        echo "✅ 内核补丁已注入：$pn（等 MIB31 签名 + 版本查询重试）"
       else
         echo "::warning::内核补丁缺失：$pn.patch"
       fi
-      echo "ℹ 跳过 401 legacy ABI 补丁（NPU_LEGACY_ABI != true）"
+      echo "ℹ 跳过 401 legacy ABI 补丁（实测该路径固件不启动）"
     fi
   else
     echo "::warning::未找到内核补丁目录 $KPATCH_DIR"
@@ -404,17 +407,16 @@ if [ "${ADD_PPE_FIXES:-true}" = "true" ]; then
     n=0
     for pf in "$PPE_FIX_SRC"/*.patch; do
       [ -f "$pf" ] || continue
-      # legacy ABI（401）改的是同一个版本查询块（无条件 if → 条件 if +
-      # version_check 标签），941-01 也改该块。401 先生成新上下文后
-      # 941-01 必然 quilt 应用失败（期望的旧上下文已被替换）。
-      # legacy 模式排除 941-01（其 fw_version 查询在 legacy 下本就跳过，
-      # sysfs 少一个 ENODATA 入口，无实际损失）。bname2 用于精确匹配。
-      if [ "${NPU_LEGACY_ABI:-false}" = "true" ]; then
-        bname="$(basename "$pf")"
-        if [ "$bname" = "941-01-net-airoha-npu-expose-cached-firmware-info.patch" ]; then
-          echo "ℹ 跳过 $bname（与 401 legacy ABI 版本查询块互斥）"
-          continue
-        fi
+      # 941-01 与 401 / 404 改的是同一段版本查询代码：
+      #   · 401 把无条件 if 改成 条件 if + version_check 标签；
+      #   · 404 把该 if 包进「等 MIB31 签名 + 重试」循环。
+      # 无论走哪条路，941-01 期望的旧上下文都已不存在 → quilt 必然失败
+      # （2026-11-26 本地 quilt 全链实测确认）。它只额外提供 fw_version
+      # sysfs（读不到时 ENODATA），与 WiFi→PON 转发无关，故一律跳过。
+      bname="$(basename "$pf")"
+      if [ "$bname" = "941-01-net-airoha-npu-expose-cached-firmware-info.patch" ]; then
+        echo "ℹ 跳过 $bname（与 401/404 的版本查询块互斥）"
+        continue
       fi
       cp "$pf" "$KPATCH_DIR_P/"
       n=$((n+1))

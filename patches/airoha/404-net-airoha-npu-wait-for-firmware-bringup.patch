@@ -1,0 +1,80 @@
+From: mayipashu <mayipashu@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 20:30:00 +0800
+Subject: [PATCH] net: airoha: npu: wait for the firmware bring-up signature
+ before querying its version
+
+The MT7916 NPU firmware (en7581_MT7916_npu_rv32.bin) needs roughly a second
+after the BOOT_TRIGGER pulse before its cores and QDMA data path are up. It
+publishes 0xcccccccc in the last MIB register only once that finished.
+
+The driver queried WLAN_FUNC_GET_WAIT_NPU_VERSION 100 ms after the pulse and
+gave up, so probe logged "NPU firmware did not answer the version query" and
+every later mailbox command failed, even though the message layout, the
+mailbox registers and the doorbell order are shared with the firmware.
+
+Measured on H3C HM2004-DU by booting the very same image from the shell with
+the driver's own sequence (MIB10/BOOT_BASE/BOOT_CONFIG=0xff, TRIGGER 0->1):
+the cores start, MIB31 reads 0xcccccccc after ~1 s, and a hand-built
+version query then returns DONE with status 0. Booting the same image
+without MIB10 and BOOT_BASE (a plain trigger pulse) leaves every core at
+PC 0, which is why the legacy-ABI path never worked either.
+
+Poll MIB31 for the signature and retry the version query a few times, so
+probe only continues once the firmware actually answers.
+
+Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
+---
+--- a/drivers/net/ethernet/airoha/airoha_npu.c
++++ b/drivers/net/ethernet/airoha/airoha_npu.c
+@@ -53,6 +53,10 @@
+ #define REG_CR_MBQ8_CTRL(_n)		(NPU_MBOX_BASE_ADDR + 0x0b0 + ((_n) << 2))
+ #define REG_CR_NPU_MIB(_n)		(NPU_MBOX_BASE_ADDR + 0x140 + ((_n) << 2))
+ 
++/* last MIB register: the firmware stores its bring-up signature here */
++#define NPU_BOOT_SIGNATURE_REG		REG_CR_NPU_MIB(31)
++#define NPU_BOOT_SIGNATURE_COMPLETE	0xcccccccc
++
+ #define NPU_WLAN_BASE_ADDR		0x30d000
+ 
+ #define REG_IRQ_STATUS			(NPU_WLAN_BASE_ADDR + 0x030)
+@@ -865,12 +869,35 @@
+ 	/* enable NPU cores */
+ 	regmap_write(npu->regmap, REG_CR_BOOT_CONFIG, 0xff);
+ 	regmap_write(npu->regmap, REG_CR_BOOT_TRIGGER, 0x1);
+-	msleep(100);
+ 
+-	if (!airoha_npu_wlan_msg_get(npu, 0, WLAN_FUNC_GET_WAIT_NPU_VERSION,
+-				     &val, sizeof(val), GFP_KERNEL))
+-		dev_info(dev, "NPU fw version: %0d.%d\n",
+-			 (val >> 16) & 0xffff, val & 0xffff);
++	/*
++	 * The MT7916 NPU firmware needs about a second to bring its cores and
++	 * the QDMA data path up, and only then publishes
++	 * NPU_BOOT_SIGNATURE_COMPLETE in the last MIB register. Querying the
++	 * version before that signature is visible times out even though both
++	 * sides agree on the message layout (verified on H3C HM2004-DU with the
++	 * en7581_MT7916 image: the very same query returns status 0 as soon as
++	 * the firmware is really running).
++	 */
++	err = regmap_read_poll_timeout(npu->regmap, NPU_BOOT_SIGNATURE_REG,
++				       val, val == NPU_BOOT_SIGNATURE_COMPLETE,
++				       2000, 5 * USEC_PER_SEC);
++	if (err)
++		dev_warn(dev, "firmware bring-up incomplete, MIB31=%#x\n", val);
++
++	/* the first query can still race the firmware's mailbox setup */
++	for (i = 0; i < 5; i++) {
++		if (!airoha_npu_wlan_msg_get(npu, 0,
++					     WLAN_FUNC_GET_WAIT_NPU_VERSION,
++					     &val, sizeof(val), GFP_KERNEL)) {
++			dev_info(dev, "NPU fw version: %0d.%d\n",
++				 (val >> 16) & 0xffff, val & 0xffff);
++			break;
++		}
++		msleep(20);
++	}
++	if (i == 5)
++		dev_warn(dev, "NPU firmware did not answer the version query\n");
+ 
+ 	platform_set_drvdata(pdev, npu);
+ 

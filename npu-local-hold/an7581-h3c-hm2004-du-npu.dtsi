@@ -3,22 +3,24 @@
  * H3C HM2004-DU —— WiFi→PON 硬件转发（NPU RX 卸载）叠加层
  *
  * ============================================================
- * MT7916 legacy ABI 版（step 2）：firmware-name + legacy boot
+ * MT7916 版（step 3）：firmware-name + 主线 boot + 等 bring-up
  * ============================================================
  *
- * 背景（实机实测，2026-11-19 → 2026-11-26）：
- *   2026-11-19 保守版实测：当前固件 NPU 用上游标准流程就能正常启动
- *   （fw version 1456.62 / npu_attached: 1 / 0 次超时），但那加载的是
- *   驱动内置名 en7581_npu_rv32.bin（120KB MT7992 通用版）。
- *   2026-11-26 首次 NPU 试验：dtsi 换成 ClankerNPU MT7916 专用固件
- *   （en7581_MT7916_npu_*.bin）却没设 legacy 属性 → 驱动仍走 mainline
- *   boot（MIB/BOOT_BASE/版本握手都是 mainline 固件期望的）→ legacy
- *   固件起不来（启动日志只见超时警告）→ mt7915 NPU RX 全断、WiFi
- *   客户端 0 关联。回滚后 WiFi 立即恢复。
- *
- *   MT7916 专用固件必须配 airoha,legacy-wlan-mailbox：
- *     401 补丁据此走 legacy boot（BOOT_CONFIG=0 + TRIGGER 0->1），
- *     跳过 MIB/BOOT_BASE 与版本握手（fw_version ENODATA 属预期）。
+ * 实测时间线（2026-11-19 → 2026-11-26）：
+ *   11-19 保守版：上游标准流程 + 驱动内置 en7581_npu_rv32.bin
+ *     （120KB MT7992 通用版）→ fw version 1456.62 / npu_attached: 1，
+ *     但 MT7992 固件不含 kite 数据通路。
+ *   11-26 step 1：换 ClankerNPU MT7916 专用固件、不设 legacy 属性 →
+ *     驱动 100ms 后就查版本 → 超时 → mt7915 NPU RX 全断、WiFi 0 客户端。
+ *   11-26 step 2：加 airoha,legacy-wlan-mailbox 走 401 legacy 脉冲 →
+ *     四核 PC 全 0，固件根本没启动（更糟）。
+ *   11-26 step 3（本版）用 devmem 手工复现驱动序列，定位到真因：
+ *     · 只给 TRIGGER 脉冲、不给 MIB10/BOOT_BASE → 核 PC=0；
+ *     · 给全 MIB10 + BOOT_BASE + BOOT_CONFIG=0xff + 脉冲 → 1 秒后
+ *       MIB31=0xcccccccc、核 PC 落在固件镜像内；
+ *     · 此时手搓 WLAN_FUNC_GET_WAIT_NPU_VERSION 立刻 DONE + status 0。
+ *   结论：ABI/邮箱一致，问题是【启动时序】。故本版移除 legacy 属性，
+ *   由 404 补丁轮询 MIB31 签名后再重试版本查询。
  *
  * 固件来源：ClankerNPU（ClankerConstruction/ClankerNPU，
  *   SOC=AN7581 WIFI=MT7916）现编的 rv32 + data 一对。
@@ -71,15 +73,13 @@
 			"airoha/en7581_MT7916_npu_data.bin";
 
 	/*
-	 * MT7916 专用固件（en7581_MT7916_npu_*.bin）是 legacy WLAN mailbox
-	 * ABI：由 401 补丁（airoha,legacy-wlan-mailbox → airoha_npu_legacy_
-	 * boot）以 BOOT_CONFIG=0 + TRIGGER 0->1 脉冲启动，跳过 MIB/BOOT_BASE
-	 * 配置、跳过版本握手（fw_version sysfs 读 ENODATA 属预期）。
+	 * 刻意【不】设 airoha,legacy-wlan-mailbox。
 	 *
-	 * 实机验证（2026-11-19，保守版无此属性）：
-	 *   缺此属性时驱动走 mainline boot（MIB/BOOT_BASE 是 mainline
-	 *   固件期望的），legacy 固件起不来 → mt7915 NPU RX 全断、
-	 *   WiFi 客户端 0 关联。加上后驱动走 legacy boot，与固件匹配。
+	 * 该属性让 401 补丁走 legacy 脉冲（BOOT_CONFIG=0 + TRIGGER 0->1，
+	 * 不写 MIB10/BOOT_BASE）。2026-11-26 实机 devmem 实测：这种启动
+	 * 方式下 NPU 四核 PC 全为 0，固件从未运行；补上 MIB10 + BOOT_BASE
+	 * 后一秒内 MIB31 变为 0xcccccccc、核 PC 落入固件镜像，且手搓
+	 * WLAN_FUNC_GET_WAIT_NPU_VERSION 立即返回 DONE + status 0。
+	 * 即邮箱 ABI 与主线一致，缺的只是 bring-up 等待（404 补丁）。
 	 */
-	airoha,legacy-wlan-mailbox;
 };
