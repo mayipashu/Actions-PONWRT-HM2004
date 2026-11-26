@@ -1,0 +1,70 @@
+From: mayipashu <mayipashu@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 03:05:00 +0800
+Subject: [PATCH] mt76: mt7915: make the NPU RX path observable
+
+With NPU RX enabled the firmware arms the host rings (base/count are
+written to 0x30d180/0x30d190) but never produces a descriptor: producer
+and consumer stay 0 and the NPU WLAN interrupt status stays clear, while
+mt7915_dma_enable() masks the host MAIN/BAND1 RX interrupts and
+mt7915_npu_rx_ring() replaces those host rings. The result is a total
+receive stall, so no station can associate.
+
+Two instrumentation gaps made that hard to see:
+
+  - mt7915_npu_debugfs() is never called, because mt76 creates its debugfs
+    tree after mt7915_npu_init() ran, so the npu_rx counters entry never
+    exists. Hook it from mt7915_npu_init() itself.
+  - the descriptor base handed to the MT7915 (from
+    WLAN_FUNC_GET_WAIT_RXDESC_BASE), the host ring base published to the
+    NPU and the value read back from the MT7915 RX ring registers are not
+    logged anywhere.
+
+Log those three values so the next run shows whether the MT7915 ring
+really points at the NPU descriptor area and whether the ring registers
+took the write.
+
+Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
+---
+--- a/mt7915/npu.c
++++ b/mt7915/npu.c
+@@ -595,6 +595,12 @@
+ 		q->irq_added = true;
+ 	}
+ 
++	/* mt76 creates its debugfs tree after this function runs, so hook the
++	 * npu_rx counters entry here instead of relying on the mt7915 debugfs
++	 * init path (which would see dev->npu == NULL).
++	 */
++	mt7915_npu_debugfs(dev, dev->mt76.debugfs_dir);
++
+ 	/* Reinitialization also changes band 0's force-to-CPU policy. */
+ 	mutex_lock(&mt7915_npu_lock);
+ 	err = 0;
+@@ -676,10 +682,17 @@
+ 		return -EINVAL;
+ 
+ 	q->radio_desc = desc;
++	dev_info(dev->mt76.dev,
++		 "NPU RX ring band%u: radio_regs=%#x bar_reg=%#x desc=%#x count=%u\n",
++		 band, regs, lower_32_bits(base + regs), desc, count);
+ 	mt76_wr(dev, regs, desc);
+ 	mt76_wr(dev, regs + 4, count);
+ 	mt76_wr(dev, regs + 8, count - 1);
+ 	mt76_wr(dev, regs + 0xc, 0);
++	dev_info(dev->mt76.dev,
++		 "NPU RX band%u radio regs: base=%#x count=%u tail=%#x head=%#x\n",
++		 band, mt76_rr(dev, regs), mt76_rr(dev, regs + 4),
++		 mt76_rr(dev, regs + 8), mt76_rr(dev, regs + 0xc));
+ 	return 0;
+ }
+ 
+@@ -714,6 +727,9 @@
+ 		regmap_write(priv->npu->regmap, q->regs + 0xc, 0);
+ 		dma_wmb();
+ 		regmap_write(priv->npu->regmap, q->regs, lower_32_bits(q->desc_dma));
++		dev_info(dev->mt76.dev,
++			 "NPU RX start band%u: npu_regs=%#x desc_dma=%pad buf_dma=%pad irq=%d\n",
++			 q->band, q->regs, &q->desc_dma, &q->buf_dma, q->irq);
+ 		priv->published = true;
+ 		napi_enable(&q->napi);
+ 		q->napi_enabled = true;
