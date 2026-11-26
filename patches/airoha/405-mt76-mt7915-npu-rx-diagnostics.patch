@@ -1,5 +1,5 @@
 From: mayipashu <mayipashu@users.noreply.github.com>
-Date: Fri, 27 Nov 2026 03:05:00 +0800
+Date: Fri, 27 Nov 2026 06:10:00 +0800
 Subject: [PATCH] mt76: mt7915: make the NPU RX path observable
 
 With NPU RX enabled the firmware arms the host rings (base/count are
@@ -11,9 +11,10 @@ receive stall, so no station can associate.
 
 Two instrumentation gaps made that hard to see:
 
-  - mt7915_npu_debugfs() is never called, because mt76 creates its debugfs
-    tree after mt7915_npu_init() ran, so the npu_rx counters entry never
-    exists. Hook it from mt7915_npu_init() itself.
+  - mt7915_npu_debugfs() is never called, because the mt7915 debugfs
+    entry point runs before mt7915_npu_init() and therefore always sees
+    dev->npu == NULL, so the npu_rx counters entry never exists. Create
+    it from debugfs root (this mt76 predates mt76_dev::debugfs_dir).
   - the descriptor base handed to the MT7915 (from
     WLAN_FUNC_GET_WAIT_RXDESC_BASE), the host ring base published to the
     NPU and the value read back from the MT7915 RX ring registers are not
@@ -27,20 +28,21 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
 ---
 --- a/mt7915/npu.c
 +++ b/mt7915/npu.c
-@@ -595,6 +595,12 @@
+@@ -595,6 +595,13 @@
  		q->irq_added = true;
  	}
  
-+	/* mt76 creates its debugfs tree after this function runs, so hook the
-+	 * npu_rx counters entry here instead of relying on the mt7915 debugfs
-+	 * init path (which would see dev->npu == NULL).
++	/* Expose the npu_rx counters. mt7915's debugfs entry point runs before
++	 * this function, so it always sees dev->npu == NULL and the file never
++	 * appears; create it from debugfs root instead (this mt76 predates
++	 * mt76_dev::debugfs_dir).
 +	 */
-+	mt7915_npu_debugfs(dev, dev->mt76.debugfs_dir);
++	mt7915_npu_debugfs(dev, NULL);
 +
  	/* Reinitialization also changes band 0's force-to-CPU policy. */
  	mutex_lock(&mt7915_npu_lock);
  	err = 0;
-@@ -676,10 +682,17 @@
+@@ -676,10 +683,17 @@
  		return -EINVAL;
  
  	q->radio_desc = desc;
@@ -58,7 +60,7 @@ Signed-off-by: mayipashu <mayipashu@users.noreply.github.com>
  	return 0;
  }
  
-@@ -714,6 +727,9 @@
+@@ -714,6 +728,9 @@
  		regmap_write(priv->npu->regmap, q->regs + 0xc, 0);
  		dma_wmb();
  		regmap_write(priv->npu->regmap, q->regs, lower_32_bits(q->desc_dma));
