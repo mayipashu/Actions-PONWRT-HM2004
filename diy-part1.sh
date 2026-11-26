@@ -161,7 +161,13 @@ if [ "$ADD_FTTR" = "true" ] && [ "$FTTR_PROFILE" = "h3c_hm2004-du" ]; then
   # ---------------------------------------------------------
   FTTR_FIX_PATCH="$GITHUB_WORKSPACE/patches/fttr/0001-fmcs-only-compare-owned-gpon-control-bits.patch"
   if [ -f "$FTTR_FIX_PATCH" ]; then
-    if patch -p1 -s -d "$FTTR_FEED_TMP" < "$FTTR_FIX_PATCH"; then
+    # 冻结分支 hm2004-stable 已并入该修复。照打的话 patch 会报
+    # "Reversed (or previously applied)" 并交互式询问、最终丢 hunk，
+    # 于是每次构建都冒一条误导性的「FTTR 补丁应用失败」告警。
+    # 先用 -R --dry-run 判定是否已在内，再决定打不打。
+    if patch -p1 -R --dry-run -s -d "$FTTR_FEED_TMP" < "$FTTR_FIX_PATCH" >/dev/null 2>&1; then
+      echo "✅ FTTR GPON 控制位校验补丁已在分支内（hm2004-stable 已含），无需重复应用"
+    elif patch -p1 -s -N -f --no-backup-if-mismatch -d "$FTTR_FEED_TMP" < "$FTTR_FIX_PATCH"; then
       echo "✅ FTTR GPON 控制位校验补丁已应用"
     else
       echo "::warning::FTTR 补丁应用失败（上游可能已改），继续构建未打补丁的版本"

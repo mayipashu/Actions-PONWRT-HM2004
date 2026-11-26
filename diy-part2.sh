@@ -351,9 +351,18 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   # ---------------------------------------------------------
   MT76_DIR="package/kernel/mt76"
   MT76_PATCH_SRC="$GITHUB_WORKSPACE/patches/airoha/402-mt76-mt7915-add-npu-rx-offload.patch"
+  # 405 是 402 的诊断叠加层（npu_rx 计数器挂点 + RX 环地址回读），
+  # 必须按数字顺序排在 402 之后。
+  MT76_DIAG_SRC="$GITHUB_WORKSPACE/patches/airoha/405-mt76-mt7915-npu-rx-diagnostics.patch"
   if [ -d "$MT76_DIR" ] && [ -f "$MT76_PATCH_SRC" ]; then
     mkdir -p "$MT76_DIR/patches"
     cp "$MT76_PATCH_SRC" "$MT76_DIR/patches/402-mt7915-add-npu-rx-offload.patch"
+    if [ -f "$MT76_DIAG_SRC" ]; then
+      cp "$MT76_DIAG_SRC" "$MT76_DIR/patches/405-mt7915-npu-rx-diagnostics.patch"
+      echo "✅ mt76 诊断补丁已注入：405（npu_rx 计数 + 环地址回读）"
+    else
+      echo "::warning::mt76 诊断补丁缺失：405"
+    fi
     # 包 Makefile 里加 MT7915_NPU 开关：m=mt76 编译 npu.o + mt7915 npu.o
     if ! grep -q "MT7915_NPU" "$MT76_DIR/Makefile"; then
       # 在 kmod-mt7915e 段的 CONFIG_MT7915E=m 之后插入 airoha 分支
