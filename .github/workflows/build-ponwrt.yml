@@ -42,6 +42,8 @@ env:
   FTTR_LUCI_BRANCH: ${{ github.event.inputs.fttr_luci_branch || 'main' }}
   # WiFi→PON 硬件转发（WED/NPU）实验开关
   ADD_NPU_OFFLOAD: ${{ github.event.inputs.npu_offload || 'false' }}
+  # NPU legacy WLAN mailbox ABI（MT7916 专用固件走原厂 boot 流程）
+  NPU_LEGACY_ABI: ${{ github.event.inputs.npu_legacy_abi || 'false' }}
 
 on:
   repository_dispatch:
@@ -172,6 +174,14 @@ on:
         default: 'main'
       npu_offload:
         description: 'WiFi→PON 硬件转发（WED/NPU），仅 h3c_hm2004-du。实验性：注入 MT7916 NPU 固件 + DTS 叠加层'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      npu_legacy_abi:
+        description: 'NPU legacy WLAN mailbox ABI（MT7916 专用固件走原厂 BOOT_CONFIG=0 boot + 跳过版本查询/PPE mailbox；注入 401 补丁并排除 942）'
         required: false
         default: 'false'
         type: choice
@@ -788,6 +798,7 @@ jobs:
           WIFI_5G_COUNTRY="$WIFI_5G_COUNTRY" WIFI_5G_CHANNEL="$WIFI_5G_CHANNEL" \
           WIFI_5G_HTMODE="$WIFI_5G_HTMODE" WIFI_5G_FALLBACK="$WIFI_5G_FALLBACK" \
           ADD_NPU_OFFLOAD="$ADD_NPU_OFFLOAD" \
+          NPU_LEGACY_ABI="$NPU_LEGACY_ABI" \
             "$GITHUB_WORKSPACE/$DIY_P2_SH"
 
           # 可选包是否被 defconfig 接受，要等步骤 9 之后才知道；

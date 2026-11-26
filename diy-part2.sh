@@ -290,24 +290,20 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   # ---------------------------------------------------------
   KVER="$(sed -n 's/^KERNEL_PATCHVER:=//p' target/linux/airoha/Makefile 2>/dev/null || echo 6.18)"
   KPATCH_DIR="target/linux/airoha/patches-${KVER}"
-  # 内核补丁：仅 400（RX-only 内存区可选）。
+  # 内核补丁：400（RX-only 内存区可选）+ 943（门铃写入顺序，两者不同区可共存）。
   #
-  # ⚠ 401（legacy BSP ABI）在本阶段【故意不注入】：
-  #   实机实测当前 NPU 用上游标准启动流程就正常
-  #   （fw version 1456.62 / npu_attached=1），而 401 会用
-  #   BOOT_CONFIG=0 + TRIGGER 脉冲替换掉那套流程、跳过 MIB/BOOT_BASE
-  #   配置。那是逆向推测、从未验证，属于「改坏本来能用的东西」。
-  #   只有在 step 1 证明「通用固件不认 WLAN 命令」之后，
-  #   把 NPU_LEGACY_ABI=true 打开才会注入它。
+  # ⚠ 401（legacy BSP ABI，MT7916 专用固件必须）与 942（等 firmware
+  #   bring-up）【互斥】——同一版本查询块基线不同（401 期望无 fw_version
+  #   字段的旧块，942 期望 941-01 之后带 fw_version 的新块），同时注入
+  #   必然 quilt 应用失败。两者都只影响 legacy ClankerNPU 固件场景：
+  #     · 401 在 legacy_abi 时直接跳过版本查询（goto version_check），
+  #       942 的 MIB31 轮询+重试是死代码 → legacy 模式不注入 942
+  #     · 非 legacy 模式不注入 401（保持上游 mainline boot）
+  #   941-01（ppe-fixes）也改版本查询块，与 401/942 基线各异，
+  #   见下方 NPU_LEGACY_ABI 分支的排除逻辑。
   if [ -d "$KPATCH_DIR" ]; then
-    # 400: TX 内存区可选（kite 只要 pkt + ba）
-    # 942: 等 ClankerNPU 固件 bring-up 完成再查版本
-    #      （MIB31 == 0xCCCCCCCC 轮询 + 重试 + 回填 fw_version）
-    #      编号必须 > 941-01：后者也改版本查询块，942 生成时已基于
-    #      400+941-01 的树，应用顺序 400 → 9xx → 942
     # 943: 邮箱命令必须在门铃之前写入（固件 ISR 读 CTRL3 判断是否等待）
     for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
-              942-net-airoha-npu-wait-for-firmware-bringup \
               943-net-airoha-npu-command-before-doorbell; do
       if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
         cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
@@ -318,12 +314,24 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
     done
 
     if [ "${NPU_LEGACY_ABI:-false}" = "true" ]; then
+      # 401: MT7916 专用固件（en7581_MT7916_npu_*.bin）是 legacy ABI，
+      #      必须用 BOOT_CONFIG=0 + TRIGGER 0->1 脉冲启动、跳过
+      #      MIB/BOOT_BASE 配置与版本握手。缺它时驱动走 mainline boot，
+      #      legacy 固件起不来 → NPU RX 全断、WiFi 客户端 0 关联（实测）。
       pn=401-net-airoha-npu-legacy-bsp-abi
       if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
         cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
-        echo "⚠ 已注入实验性 legacy ABI 补丁：$pn（会替换 NPU 启动流程）"
+        echo "⚠ 已注入 legacy ABI 补丁：$pn（legacy boot + 跳过版本查询）"
       fi
     else
+      # 非 legacy：照常注入 942（等 bring-up + 查版本回填 fw_version）
+      pn=942-net-airoha-npu-wait-for-firmware-bringup
+      if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
+        cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
+        echo "✅ 内核补丁已注入：$pn"
+      else
+        echo "::warning::内核补丁缺失：$pn.patch"
+      fi
       echo "ℹ 跳过 401 legacy ABI 补丁（NPU_LEGACY_ABI != true）"
     fi
   else
@@ -396,6 +404,18 @@ if [ "${ADD_PPE_FIXES:-true}" = "true" ]; then
     n=0
     for pf in "$PPE_FIX_SRC"/*.patch; do
       [ -f "$pf" ] || continue
+      # legacy ABI（401）改的是同一个版本查询块（无条件 if → 条件 if +
+      # version_check 标签），941-01 也改该块。401 先生成新上下文后
+      # 941-01 必然 quilt 应用失败（期望的旧上下文已被替换）。
+      # legacy 模式排除 941-01（其 fw_version 查询在 legacy 下本就跳过，
+      # sysfs 少一个 ENODATA 入口，无实际损失）。bname2 用于精确匹配。
+      if [ "${NPU_LEGACY_ABI:-false}" = "true" ]; then
+        bname="$(basename "$pf")"
+        if [ "$bname" = "941-01-net-airoha-npu-expose-cached-firmware-info.patch" ]; then
+          echo "ℹ 跳过 $bname（与 401 legacy ABI 版本查询块互斥）"
+          continue
+        fi
+      fi
       cp "$pf" "$KPATCH_DIR_P/"
       n=$((n+1))
     done
