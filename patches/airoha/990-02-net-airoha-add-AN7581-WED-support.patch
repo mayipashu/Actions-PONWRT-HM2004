@@ -269,7 +269,7 @@
  	foe_size = ppe_num_entries * sizeof(struct airoha_foe_entry);
 --- /dev/null
 +++ b/drivers/net/ethernet/airoha/airoha_wed.c
-@@ -0,0 +1,1690 @@
+@@ -0,0 +1,1694 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha WED v1 (WiFi Ethernet Datapath) driver for AN7581/EN7581
