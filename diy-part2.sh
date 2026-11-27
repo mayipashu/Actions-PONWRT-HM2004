@@ -330,6 +330,10 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   #            AN7581 WED v1 TX 后端（PPE→PSE port3→WDMA→WED）
   #   991      AN7581 的 PPE 改由 CPU 直接初始化（hw_initialized 本地置位），
   #            PPE 不再依赖 NPU 完成 offload_setup
+  #   992      卸载量可读：给每个 GDM 端口加「真正经过 CPU 的帧」计数，
+  #            新增 ppe/offload，用 GDM MIB（线上总量）减 CPU 量估计硬件转发。
+  #            背景：per-flow 计数只有 NPU 固件维护（npu->stats 由固件写），
+  #            本方案不挂 NPU，所以 bind 里的 packets 恒为 0，不是没转发。
   #
   # 与旧方案（952/953/954，来自 wuziwei 的 HG5585F 分支）的关系：
   # 二者不能共存——952 与 990-01 抢同一个 mediatek/Kconfig，且 952 需要把
@@ -348,7 +352,8 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
     for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
               990-01-net-ethernet-share-mtk-wed-ops-and-private-header \
               990-02-net-airoha-add-AN7581-WED-support \
-              991-net-airoha-ppe-direct-cpu-programming-for-AN7581; do
+              991-net-airoha-ppe-direct-cpu-programming-for-AN7581 \
+              992-net-airoha-ppe-account-hardware-forwarded-traffic; do
       src=""
       [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ] && \
         src="$GITHUB_WORKSPACE/patches/airoha/$pn.patch"

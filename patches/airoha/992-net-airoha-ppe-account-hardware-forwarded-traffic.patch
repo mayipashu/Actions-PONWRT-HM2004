@@ -1,0 +1,210 @@
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -695,6 +695,16 @@
+ 	void *pon_link_priv;
+ 	struct airoha_pon_datapath_counters pon_stats;
+ 
++	/* 真正经过 CPU 的帧。与 GDM MIB（线上总量）相减即为硬件转发量：
++	 * 被 PPE 转发出去的帧不会到达 CPU，因此不会进入这里。
++	 */
++	struct {
++		atomic64_t rx_pkts;
++		atomic64_t rx_bytes;
++		atomic64_t tx_pkts;
++		atomic64_t tx_bytes;
++	} cpu_stats;
++
+ 	struct airoha_hw_stats stats;
+ 
+ 	/* Serialize netdev_tx_completed_queue() calls per TX queue during
+@@ -716,6 +726,15 @@
+ 	/* protect concurrent GDM4 register access */
+ 	struct mutex link_lock;
+ 
++	/* ppe/offload 的上一次读取快照，用于算增量速率 */
++	struct {
++		u64 wire_rx;
++		u64 wire_tx;
++		u64 cpu_rx;
++		u64 cpu_tx;
++		unsigned long jiffies;
++	} acc_prev;
++
+ 	struct metadata_dst *dsa_meta[AIROHA_MAX_DSA_PORTS];
+ };
+ 
+@@ -868,6 +887,7 @@
+ u32 airoha_ppe_get_total_num_entries(struct airoha_ppe *ppe);
+ struct airoha_foe_entry *airoha_ppe_foe_get_entry(struct airoha_ppe *ppe,
+ 						  u32 hash);
++void airoha_gdm_update_hw_stats(struct airoha_gdm_dev *dev);
+ void airoha_ppe_foe_entry_get_stats(struct airoha_ppe *ppe, u32 hash,
+ 				    struct airoha_foe_stats64 *stats);
+ 
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -1122,6 +1122,8 @@
+ 			atomic64_inc(&dev->pon_stats.rx_packets_delivered);
+ 			atomic64_inc(&dev->pon_stats.rx_channel_packets[channel]);
+ 		}
++		atomic64_inc(&dev->cpu_stats.rx_pkts);
++		atomic64_add(q->skb->len, &dev->cpu_stats.rx_bytes);
+ 		napi_gro_receive(&q->napi, q->skb);
+ 		q->skb = NULL;
+ 		continue;
+@@ -2200,7 +2202,7 @@
+ 	}
+ }
+ 
+-static void airoha_update_hw_stats(struct airoha_gdm_dev *dev)
++void airoha_gdm_update_hw_stats(struct airoha_gdm_dev *dev)
+ {
+ 	struct airoha_gdm_port *port = dev->port;
+ 	struct airoha_eth *eth = dev->eth;
+@@ -2813,7 +2815,7 @@
+ 	struct airoha_gdm_dev *dev = netdev_priv(netdev);
+ 	unsigned int start;
+ 
+-	airoha_update_hw_stats(dev);
++	airoha_gdm_update_hw_stats(dev);
+ 	do {
+ 		start = u64_stats_fetch_begin(&dev->stats.syncp);
+ 		storage->rx_packets = dev->stats.rx_ok_pkts;
+@@ -3009,6 +3011,12 @@
+ 	u16 index;
+ 	u8 fport, nboq;
+ 
++	/* 只统计 CPU 实际提交的帧；控制帧走 OAM/OMCC 专用通道，不计入。 */
++	if (!ctrl) {
++		atomic64_inc(&dev->cpu_stats.tx_pkts);
++		atomic64_add(skb->len, &dev->cpu_stats.tx_bytes);
++	}
++
+ 	rcu_read_lock();
+ 	qdma = rcu_dereference(dev->qdma);
+ 	qid = airoha_qdma_get_txq(qdma, skb_get_queue_mapping(skb));
+@@ -3289,7 +3297,7 @@
+ 	struct airoha_gdm_dev *dev = netdev_priv(netdev);
+ 	unsigned int start;
+ 
+-	airoha_update_hw_stats(dev);
++	airoha_gdm_update_hw_stats(dev);
+ 	do {
+ 		start = u64_stats_fetch_begin(&dev->stats.syncp);
+ 		stats->FramesTransmittedOK = dev->stats.tx_ok_pkts;
+@@ -3328,7 +3336,7 @@
+ 		     ARRAY_SIZE(hw_stats->rx_len) + 1);
+ 
+ 	*ranges = airoha_ethtool_rmon_ranges;
+-	airoha_update_hw_stats(dev);
++	airoha_gdm_update_hw_stats(dev);
+ 	do {
+ 		int i;
+ 
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -300,6 +300,95 @@
+ 	return count;
+ }
+ 
++/*
++ * ppe/offload —— 估计硬件转发了多少流量。
++ *
++ * CPU-PPE 模式下没有可读的硬件包计数器：NPU 才维护 per-flow 计数
++ * （npu->stats 由固件写入），而我们不挂 NPU。可达的两个量是：
++ *   wire  端口 GDM MIB 计数，含被 PPE 直接转发、不经过 CPU 的帧
++ *   cpu   真正交付给协议栈（RX）或由 CPU 提交（TX）的帧，本补丁新增
++ * 两者之差就是硬件转发量。每个端口打印累计值与距上次读取的速率，
++ * 速率用 jiffies 增量归一化，取整到每秒。
++ */
++static int airoha_ppe_debugfs_offload_show(struct seq_file *m, void *private)
++{
++	struct airoha_ppe *ppe = m->private;
++	struct airoha_eth *eth = ppe->eth;
++	unsigned long now = jiffies;
++	int i, j;
++
++	seq_puts(m, "# port wire_rx cpu_rx hw_rx wire_tx cpu_tx hw_tx hw_pps\n");
++
++	for (i = 0; i < AIROHA_MAX_NUM_GDM_PORTS; i++) {
++		struct airoha_gdm_port *port = eth->ports[i];
++
++		if (!port)
++			continue;
++
++		for (j = 0; j < AIROHA_MAX_NUM_GDM_DEVS; j++) {
++			struct airoha_gdm_dev *dev = port->devs[j];
++			unsigned long dt;
++			u64 wire_rx, wire_tx, cpu_rx, cpu_tx, hw_rx, hw_tx;
++			u64 hw_pps = 0;
++			struct net_device *netdev;
++
++			if (!dev)
++				continue;
++
++			netdev = netdev_from_priv(dev);
++
++			airoha_gdm_update_hw_stats(dev);
++
++			wire_rx = READ_ONCE(dev->stats.rx_ok_pkts);
++			wire_tx = READ_ONCE(dev->stats.tx_ok_pkts);
++			cpu_rx = atomic64_read(&dev->cpu_stats.rx_pkts);
++			cpu_tx = atomic64_read(&dev->cpu_stats.tx_pkts);
++
++			hw_rx = wire_rx > cpu_rx ? wire_rx - cpu_rx : 0;
++			hw_tx = wire_tx > cpu_tx ? wire_tx - cpu_tx : 0;
++
++			dt = now - port->acc_prev.jiffies;
++			if (port->acc_prev.jiffies && dt) {
++				u64 d_wire = wire_rx > port->acc_prev.wire_rx ?
++					     wire_rx - port->acc_prev.wire_rx : 0;
++				u64 d_cpu = cpu_rx > port->acc_prev.cpu_rx ?
++					    cpu_rx - port->acc_prev.cpu_rx : 0;
++
++				if (d_wire > d_cpu)
++					hw_pps = div_u64((d_wire - d_cpu) * HZ, dt);
++			}
++			port->acc_prev.wire_rx = wire_rx;
++			port->acc_prev.wire_tx = wire_tx;
++			port->acc_prev.cpu_rx = cpu_rx;
++			port->acc_prev.cpu_tx = cpu_tx;
++			port->acc_prev.jiffies = now;
++
++			seq_printf(m, "%-10s wire_rx=%llu cpu_rx=%llu hw_rx=%llu"
++				      " wire_tx=%llu cpu_tx=%llu hw_tx=%llu"
++				      " hw_pps=%llu\n",
++				   netdev ? netdev_name(netdev) : "?", wire_rx, cpu_rx, hw_rx,
++				   wire_tx, cpu_tx, hw_tx, hw_pps);
++		}
++	}
++
++	return 0;
++}
++
++static int airoha_ppe_debugfs_offload_open(struct inode *inode,
++					   struct file *file)
++{
++	return single_open(file, airoha_ppe_debugfs_offload_show,
++			   inode->i_private);
++}
++
++static const struct file_operations airoha_ppe_debugfs_offload_fops = {
++	.owner = THIS_MODULE,
++	.open = airoha_ppe_debugfs_offload_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
+ static const struct file_operations airoha_ppe_debugfs_bind_rate_fops = {
+ 	.owner = THIS_MODULE,
+ 	.open = airoha_ppe_debugfs_bind_rate_open,
+@@ -320,6 +409,8 @@
+ 			    &airoha_ppe_debugfs_foe_all_fops);
+ 	debugfs_create_file("bind", 0444, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_foe_bind_fops);
++	debugfs_create_file("offload", 0444, ppe->debugfs_dir, ppe,
++			    &airoha_ppe_debugfs_offload_fops);
+ 
+ 	return 0;
+ }
