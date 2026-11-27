@@ -1,0 +1,472 @@
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -729,6 +729,7 @@ struct airoha_ppe {
+ 	dma_addr_t foe_stats_dma;
+ 
+ 	struct dentry *debugfs_dir;
++	bool hw_initialized;
+ };
+ 
+ struct airoha_eth_soc_data {
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -39,12 +39,17 @@ static const struct rhashtable_params ai
+ 	.automatic_shrinking = true,
+ };
+ 
++static bool airoha_ppe_use_cpu_init(struct airoha_eth *eth)
++{
++	return airoha_is_7581(eth);
++}
++
+ static int airoha_ppe_get_num_stats_entries(struct airoha_ppe *ppe)
+ {
+ 	if (!IS_ENABLED(CONFIG_NET_AIROHA_FLOW_STATS))
+ 		return -EOPNOTSUPP;
+ 
+-	if (airoha_is_7583(ppe->eth))
++	if (airoha_is_7583(ppe->eth) || airoha_ppe_use_cpu_init(ppe->eth))
+ 		return -EOPNOTSUPP;
+ 
+ 	return PPE_STATS_NUM_ENTRIES;
+@@ -931,6 +936,9 @@ static int airoha_ppe_foe_commit_entry(s
+ 	struct airoha_npu *npu;
+ 	int err = 0;
+ 
++	if (!READ_ONCE(ppe->hw_initialized))
++		return -ENODEV;
++
+ 	memcpy(&hwe->d, &e->d, sizeof(*hwe) - sizeof(hwe->ib1));
+ 	wmb();
+ 
+@@ -941,17 +949,12 @@ static int airoha_ppe_foe_commit_entry(s
+ 	rcu_read_lock();
+ 
+ 	npu = rcu_dereference(eth->npu);
+-	if (!npu) {
+-		err = -ENODEV;
+-		goto unlock;
+-	}
+-
+-	if (!rx_wlan)
++	if (!rx_wlan && npu)
+ 		airoha_ppe_foe_flow_stats_update(ppe, npu, hwe, hash);
+ 
+ 	if (hash < sram_num_entries)
+ 		err = airoha_ppe_foe_commit_sram_entry(ppe, hash);
+-unlock:
++
+ 	rcu_read_unlock();
+ 
+ 	return err;
+@@ -1618,8 +1621,6 @@ static int airoha_ppe_flush_sram_entries
+ 	int i, err = 0;
+ 
+ 	for (i = 0; i < sram_num_entries; i++) {
+-		int err;
+-
+ 		memset(&hwe[i], 0, sizeof(*hwe));
+ 		err = airoha_ppe_foe_commit_sram_entry(ppe, i);
+ 		if (err)
+@@ -1629,6 +1630,248 @@ static int airoha_ppe_flush_sram_entries
+ 	return err;
+ }
+ 
++static void airoha_ppe_fe_update_bits(struct airoha_eth *eth, u32 offset,
++				      u32 mask, u32 val)
++{
++	airoha_fe_rmw(eth, offset, mask, val & mask);
++}
++
++static void airoha_ppe_an7581_config_proto_filter(struct airoha_eth *eth)
++{
++	int i, f;
++
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		for (f = 0; f < 4; f++)
++			airoha_fe_wr(eth, REG_PPE_IP_PROTO_FILTER(i, f), 0);
++
++		airoha_fe_wr(eth, REG_PPE_IP_PROTO_CHK(i),
++			     PPE_IP_PROTO_CHK_BLACKLIST);
++		airoha_fe_set(eth, REG_PPE_PPE_FLOW_CFG(i),
++			      PPE_FLOW_CFG_IP_PROTO_BLACKLIST_MASK);
++		airoha_fe_wr(eth, REG_PPE_IP_PROTO_FILTER(i, 0),
++			     PPE_IP_PROTO_FILTER0_BLACKLIST);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_IP_PROTO_FILTER(i, 1),
++					  GENMASK(15, 0),
++					  PPE_IP_PROTO_FILTER1_BLACKLIST);
++	}
++}
++
++static void airoha_ppe_an7581_config_tpid_entry(struct airoha_eth *eth,
++						u32 index, bool enable,
++						u16 value)
++{
++	u32 enable_bit = BIT(index);
++	u32 shift = (index & 1) * 16;
++	u32 mask = 0xffffU << shift;
++	int i;
++
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		airoha_ppe_fe_update_bits(eth, REG_PPE_TPID_EN(i), enable_bit,
++					  enable ? enable_bit : 0);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_TPID_VAL(i, index >> 1),
++					  mask, (u32)value << shift);
++	}
++}
++
++static void airoha_ppe_an7581_config_tpid(struct airoha_eth *eth)
++{
++	u32 ethertype = airoha_fe_rr(eth, REG_FE_DMA_GLO_CFG) >> 16;
++	int i;
++
++	for (i = 0; i < eth->soc->num_ppe; i++)
++		airoha_fe_wr(eth, REG_PPE_TPID_CFG(i), PPE_TPID_CFG_DEFAULT);
++
++	airoha_ppe_an7581_config_tpid_entry(eth, 0, true, ETH_P_8021Q);
++	airoha_ppe_an7581_config_tpid_entry(eth, 1, true, ETH_P_8021AD);
++	if (ethertype != ETH_P_8021Q && ethertype != ETH_P_8021AD)
++		airoha_ppe_an7581_config_tpid_entry(eth, 2, true, ethertype);
++
++	airoha_ppe_an7581_config_tpid_entry(eth, 3, true, ETH_P_IP);
++	airoha_ppe_an7581_config_tpid_entry(eth, 4, true, ETH_P_IPV6);
++}
++
++static void airoha_ppe_an7581_config_policy(struct airoha_eth *eth)
++{
++	static const u32 policy[] = {
++		0x07d407d0,
++		0x07dc07d8,
++		0x07e407e0,
++		0x000007e8,
++	};
++	int i, j;
++
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		for (j = 0; j < ARRAY_SIZE(policy); j++)
++			airoha_fe_wr(eth, REG_PPE_MTU_BASE(i) + (j << 2),
++				     policy[j]);
++	}
++}
++
++static void airoha_ppe_an7581_config_flow_type(struct airoha_eth *eth)
++{
++	int i;
++
++	for (i = 0; i < eth->soc->num_ppe; i++)
++		airoha_ppe_fe_update_bits(
++			eth, REG_PPE_PPE_FLOW_CFG(i),
++			(u32)~PPE_FLOW_CFG_IP_PROTO_BLACKLIST_MASK,
++			PPE_FLOW_CFG_TYPE3_INIT);
++}
++
++static void airoha_ppe_an7581_config_table_hash(struct airoha_eth *eth,
++						bool ppe2_was_enabled)
++{
++	u32 table_count = FIELD_PREP(PPE_SRAM_TB_NUM_ENTRY_MASK,
++				     ppe2_was_enabled ? 3 : 4);
++	int i;
++
++	for (i = 0; i < eth->soc->num_ppe; i++)
++		airoha_ppe_fe_update_bits(eth, REG_PPE_TB_HASH_CFG(i),
++					  0x00010101, 0x00000101);
++
++	airoha_ppe_fe_update_bits(eth, REG_PPE_TB_CFG(0),
++				  PPE_SRAM_TB_NUM_ENTRY_MASK, table_count);
++	if (ppe2_was_enabled && eth->soc->num_ppe > 1)
++		airoha_ppe_fe_update_bits(eth, REG_PPE_TB_CFG(1),
++					  PPE_SRAM_TB_NUM_ENTRY_MASK,
++					  table_count);
++
++	airoha_ppe_fe_update_bits(eth, REG_PPE_TB_CFG(0),
++				  PPE_DRAM_TB_NUM_ENTRY_MASK, 6);
++
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		airoha_fe_clear(eth, REG_PPE_TB_HASH_CFG(i),
++				PPE_SRAM_HASH0_MODE_MASK);
++		airoha_fe_set(eth, REG_PPE_TB_HASH_CFG(i),
++			      FIELD_PREP(PPE_SRAM_HASH1_MODE_MASK, 1));
++		airoha_fe_clear(eth, REG_PPE_TB_HASH_CFG(i),
++				PPE_DRAM_HASH0_MODE_MASK);
++		if (!i || ppe2_was_enabled)
++			airoha_ppe_fe_update_bits(
++				eth, REG_PPE_TB_HASH_CFG(i),
++				PPE_DRAM_HASH1_MODE_MASK,
++				FIELD_PREP(PPE_DRAM_HASH1_MODE_MASK, 3));
++
++		airoha_fe_wr(eth, REG_PPE_HASH_SEED(i), PPE_HASH_SEED);
++		airoha_fe_clear(eth, REG_PPE_TB_CFG(i),
++				PPE_TB_ENTRY_SIZE_MASK);
++		airoha_fe_set(eth, REG_PPE_TB_CFG(i),
++			      FIELD_PREP(PPE_TB_CFG_SEARCH_MISS_MASK, 3));
++	}
++}
++
++static void airoha_ppe_an7581_config_aging(struct airoha_eth *eth)
++{
++	int i;
++
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		airoha_fe_set(eth, REG_PPE_TB_CFG(i),
++			      PPE_TB_CFG_AGE_EN_MASK |
++			      PPE_TB_CFG_KEEPALIVE_MASK);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_UNBIND_AGE(i),
++					  0xffff00ff, 0x03e80003);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_BND_AGE0(i),
++					  0x7fff7fff, 0x000f003c);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_BND_AGE1(i),
++					  0x7fff7fff, 0x0005003c);
++		airoha_fe_wr(eth, REG_PPE_KEEPALIVE(i), 0x01010001);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_BIND_LIMIT0(i),
++					  0x3fff3fff, 0x0fa00fa0);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_BIND_LIMIT1(i),
++					  0x00ff3fff, 0x00011f40);
++		airoha_fe_wr(eth, REG_PPE_BIND_RATE(i), 0x001e001e);
++	}
++}
++
++static void airoha_ppe_an7581_config_global_enable(struct airoha_eth *eth)
++{
++	int i;
++
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		airoha_ppe_fe_update_bits(eth, REG_PPE_GLO_CFG(i),
++					  PPE_GLO_CFG_FEAT_CLR_MASK |
++					  PPE_GLO_CFG_INIT_FEAT_MASK,
++					  PPE_GLO_CFG_INIT_FEAT_MASK);
++		airoha_fe_set(eth, REG_PPE_GLO_CFG(i),
++			      PPE_GLO_CFG_SRAM_EN_MASK);
++		airoha_fe_set(eth, REG_PPE_GLO_CFG(i), PPE_GLO_CFG_EN_MASK);
++		airoha_fe_set(eth, REG_PPE_PPE_FLOW_CFG(i),
++			      PPE_FLOW_CFG_IP6_HASH_GRE_KEY_MASK |
++			      (i ? PPE_FLOW_CFG_IP4_HASH_GRE_KEY_MASK : 0));
++		airoha_fe_set(eth, REG_PPE_GLO_CFG(i),
++			      PPE_GLO_CFG_TABLE_FEAT_MASK);
++		airoha_ppe_fe_update_bits(
++			eth, REG_PPE_PPE_FLOW_CFG(i),
++			PPE_FLOW_CFG_FINAL_CLR_MASK |
++			PPE_FLOW_CFG_IP4_HASH_GRE_KEY_MASK,
++			PPE_FLOW_CFG_IP4_HASH_GRE_KEY_MASK);
++	}
++}
++
++static void airoha_ppe_an7581_hw_init(struct airoha_eth *eth)
++{
++	bool ppe2_was_enabled;
++	int i;
++
++	airoha_fe_set(eth, REG_PPE_GLO_CFG(0), PPE_GLO_CFG_PSE_HASH_OFS_MASK);
++	airoha_ppe_fe_update_bits(eth, REG_PPE_TB_CFG(0),
++				  PPE_TB_CFG_ENTRY_CNT_CLR_MASK |
++				  PPE_TB_CFG_KEEPALIVE_MASK,
++				  PPE_TB_CFG_KEEPALIVE_MASK);
++	if (eth->soc->num_ppe > 1) {
++		airoha_fe_set(eth, REG_PPE_GLO_CFG(1),
++			      PPE_GLO_CFG_PSE_HASH_OFS_MASK);
++		airoha_ppe_fe_update_bits(eth, REG_PPE_TB_CFG(1),
++					  PPE_TB_CFG_ENTRY_CNT_CLR_MASK |
++					  PPE_TB_CFG_PPE2_ENTRY_CNT_MASK |
++					  PPE_TB_CFG_KEEPALIVE_MASK,
++					  PPE_TB_CFG_PPE2_ENTRY_CNT_MASK |
++					  PPE_TB_CFG_KEEPALIVE_MASK);
++	}
++	ppe2_was_enabled = airoha_ppe_is_enabled(eth, 1);
++
++	airoha_ppe_an7581_config_proto_filter(eth);
++	airoha_ppe_an7581_config_tpid(eth);
++	airoha_ppe_an7581_config_policy(eth);
++	airoha_ppe_an7581_config_flow_type(eth);
++	airoha_ppe_an7581_config_table_hash(eth, ppe2_was_enabled);
++	airoha_ppe_an7581_config_aging(eth);
++	airoha_ppe_an7581_config_global_enable(eth);
++
++	for (i = 0; i < eth->soc->num_ppe; i++)
++		airoha_fe_wr(eth, REG_PPE_DFT_CPORT_BASE(i), 0x00000500);
++}
++
++static void airoha_ppe_an7581_hw_deinit(struct airoha_eth *eth)
++{
++	u32 flow_cfg;
++	int i;
++
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		airoha_fe_wr(eth, REG_PPE_DFT_CPORT_BASE(i), 0x00000500);
++		airoha_fe_clear(eth, REG_PPE_GLO_CFG(i), PPE_GLO_CFG_EN_MASK);
++		airoha_fe_clear(eth, REG_PPE_GLO_CFG(i),
++				PPE_GLO_CFG_INIT_FEAT_MASK);
++		airoha_fe_clear(eth, REG_PPE_GLO_CFG(i),
++				PPE_GLO_CFG_SRAM_EN_MASK);
++		airoha_fe_clear(eth, REG_PPE_GLO_CFG(i),
++				PPE_GLO_CFG_TTL_DROP_MASK);
++		airoha_fe_set(eth, REG_PPE_GLO_CFG(i),
++			      PPE_GLO_CFG_IP4_CS_DROP_MASK |
++			      PPE_GLO_CFG_IP4_L4_CS_DROP_MASK);
++		airoha_fe_clear(eth, REG_PPE_GLO_CFG(i),
++				PPE_GLO_CFG_TABLE_FEAT_MASK);
++	}
++
++	flow_cfg = airoha_fe_rr(eth, REG_PPE_PPE_FLOW_CFG(0)) &
++		   PPE_FLOW_CFG_IP_PROTO_BLACKLIST_MASK;
++	for (i = 0; i < eth->soc->num_ppe; i++) {
++		airoha_fe_wr(eth, REG_PPE_PPE_FLOW_CFG(i), flow_cfg);
++		airoha_fe_clear(eth, REG_PPE_TB_CFG(i),
++				PPE_TB_CFG_AGE_EN_MASK);
++	}
++}
++
+ static struct airoha_npu *airoha_ppe_npu_get(struct airoha_eth *eth)
+ {
+ 	struct airoha_npu *npu = airoha_npu_get(eth->dev);
+@@ -1666,10 +1909,20 @@ static int airoha_ppe_wait_for_npu_init(
+ 
+ static int airoha_ppe_offload_setup(struct airoha_eth *eth)
+ {
+-	struct airoha_npu *npu = airoha_ppe_npu_get(eth);
+ 	struct airoha_ppe *ppe = eth->ppe;
++	struct airoha_npu *npu;
+ 	int err, ppe_num_stats_entries;
+ 
++	if (airoha_ppe_use_cpu_init(eth)) {
++		airoha_ppe_an7581_hw_init(eth);
++		airoha_ppe_hw_init(ppe);
++		WRITE_ONCE(ppe->hw_initialized, true);
++		synchronize_rcu();
++
++		return 0;
++	}
++
++	npu = airoha_ppe_npu_get(eth);
+ 	if (IS_ERR(npu))
+ 		return PTR_ERR(npu);
+ 
+@@ -1693,6 +1946,7 @@ static int airoha_ppe_offload_setup(stru
+ 	airoha_ppe_hw_init(ppe);
+ 	airoha_ppe_foe_flow_stats_reset(ppe, npu);
+ 
++	WRITE_ONCE(ppe->hw_initialized, true);
+ 	rcu_assign_pointer(eth->npu, npu);
+ 	synchronize_rcu();
+ 
+@@ -1719,7 +1973,7 @@ int airoha_ppe_setup_tc_block_cb(struct
+ 
+ 	mutex_lock(&flow_offload_mutex);
+ 
+-	if (!eth->npu)
++	if (!eth->ppe->hw_initialized)
+ 		err = airoha_ppe_offload_setup(eth);
+ 	if (!err)
+ 		err = airoha_ppe_flow_offload_cmd(eth, type_data);
+@@ -1954,16 +2208,27 @@ error_flow_table_destroy:
+ 
+ void airoha_ppe_deinit(struct airoha_eth *eth)
+ {
++	struct airoha_ppe *ppe = eth->ppe;
+ 	struct airoha_npu *npu;
++	bool was_initialized;
+ 
+ 	mutex_lock(&flow_offload_mutex);
+ 
++	spin_lock_bh(&ppe_lock);
++	was_initialized = ppe->hw_initialized;
++	WRITE_ONCE(ppe->hw_initialized, false);
++	spin_unlock_bh(&ppe_lock);
++
+ 	npu = rcu_replace_pointer(eth->npu, NULL,
+ 				  lockdep_is_held(&flow_offload_mutex));
+-	if (npu) {
++	if (was_initialized || npu)
+ 		synchronize_rcu();
++
++	if (npu) {
+ 		npu->ops.ppe_deinit(npu);
+ 		airoha_npu_put(npu);
++	} else if (was_initialized && airoha_ppe_use_cpu_init(eth)) {
++		airoha_ppe_an7581_hw_deinit(eth);
+ 	}
+ 
+ 	mutex_unlock(&flow_offload_mutex);
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -197,6 +197,8 @@ static int airoha_ppe_debugfs_config_sho
+ 	 */
+ 	seq_printf(m, "npu_attached: %u\n",
+ 		   !!rcu_access_pointer(eth->npu));
++	seq_printf(m, "ppe_initialized: %u\n",
++		   READ_ONCE(ppe->hw_initialized));
+ 	seq_printf(m, "gdm2_fwd_cfg: %08x\n",
+ 		   airoha_fe_rr(eth, REG_GDM_FWD_CFG(AIROHA_GDM2_IDX)));
+ 	seq_printf(m, "fe_wan_port: %08x\n",
+--- a/drivers/net/ethernet/airoha/airoha_regs.h
++++ b/drivers/net/ethernet/airoha/airoha_regs.h
+@@ -257,15 +257,21 @@
+ 
+ #define REG_PPE_GLO_CFG(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x200)
+ #define PPE_GLO_CFG_BUSY_MASK			BIT(31)
++#define PPE_GLO_CFG_TABLE_FEAT_MASK		GENMASK(17, 16)
++#define PPE_GLO_CFG_SRAM_EN_MASK		BIT(15)
+ #define PPE_GLO_CFG_FLOW_DROP_UPDATE_MASK	BIT(9)
++#define PPE_GLO_CFG_INIT_FEAT_MASK		0x00000342
+ #define PPE_GLO_CFG_PSE_HASH_OFS_MASK		BIT(6)
+ #define PPE_GLO_CFG_PPE_BSWAP_MASK		BIT(5)
++#define PPE_GLO_CFG_FEAT_CLR_MASK		0x0000003c
+ #define PPE_GLO_CFG_TTL_DROP_MASK		BIT(4)
+ #define PPE_GLO_CFG_IP4_CS_DROP_MASK		BIT(3)
+ #define PPE_GLO_CFG_IP4_L4_CS_DROP_MASK		BIT(2)
+ #define PPE_GLO_CFG_EN_MASK			BIT(0)
+ 
+ #define REG_PPE_PPE_FLOW_CFG(_n)		(((_n) ? PPE2_BASE : PPE1_BASE) + 0x204)
++#define PPE_FLOW_CFG_TYPE3_INIT			0x06a0f7c0
++#define PPE_FLOW_CFG_FINAL_CLR_MASK		0x000200c0
+ #define PPE_FLOW_CFG_IP6_HASH_GRE_KEY_MASK	BIT(20)
+ #define PPE_FLOW_CFG_IP4_HASH_GRE_KEY_MASK	BIT(19)
+ #define PPE_FLOW_CFG_IP4_HASH_FLOW_LABEL_MASK	BIT(18)
+@@ -283,8 +289,15 @@
+ #define REG_PPE_IP_PROTO_CHK(_n)		(((_n) ? PPE2_BASE : PPE1_BASE) + 0x208)
+ #define PPE_IP_PROTO_CHK_IPV4_MASK		GENMASK(31, 16)
+ #define PPE_IP_PROTO_CHK_IPV6_MASK		GENMASK(15, 0)
++#define PPE_IP_PROTO_CHK_BLACKLIST		0x000f000f
++
++#define REG_PPE_IP_PROTO_FILTER(_n, _m)		(((_n) ? PPE2_BASE : PPE1_BASE) + 0x20c + ((_m) << 2))
++#define PPE_IP_PROTO_FILTER0_BLACKLIST		0x04291106
++#define PPE_IP_PROTO_FILTER1_BLACKLIST		0x00003a01
+ 
+ #define REG_PPE_TB_CFG(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x21c)
++#define PPE_TB_CFG_ENTRY_CNT_CLR_MASK		BIT(28)
++#define PPE_TB_CFG_PPE2_ENTRY_CNT_MASK		BIT(27)
+ #define PPE_SRAM_TB_NUM_ENTRY_MASK		GENMASK(26, 24)
+ #define PPE_TB_CFG_KEEPALIVE_MASK		GENMASK(13, 12)
+ #define PPE_TB_CFG_AGE_TCP_FIN_MASK		BIT(11)
+@@ -292,6 +305,12 @@
+ #define PPE_TB_CFG_AGE_TCP_MASK			BIT(9)
+ #define PPE_TB_CFG_AGE_UNBIND_MASK		BIT(8)
+ #define PPE_TB_CFG_AGE_NON_L4_MASK		BIT(7)
++#define PPE_TB_CFG_AGE_EN_MASK			\
++	(PPE_TB_CFG_AGE_TCP_FIN_MASK |		\
++	 PPE_TB_CFG_AGE_UDP_MASK |		\
++	 PPE_TB_CFG_AGE_TCP_MASK |		\
++	 PPE_TB_CFG_AGE_UNBIND_MASK |		\
++	 PPE_TB_CFG_AGE_NON_L4_MASK)
+ #define PPE_TB_CFG_AGE_PREBIND_MASK		BIT(6)
+ #define PPE_TB_CFG_SEARCH_MISS_MASK		GENMASK(5, 4)
+ #define PPE_TB_ENTRY_SIZE_MASK			BIT(3)
+@@ -311,6 +330,8 @@
+ #define PPE_BIND_LIMIT1_NON_L4_MASK		GENMASK(23, 16)
+ #define PPE_BIND_LIMIT1_FULL_MASK		GENMASK(13, 0)
+ 
++#define REG_PPE_KEEPALIVE(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x234)
++
+ #define REG_PPE_BND_AGE0(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x23c)
+ #define PPE_BIND_AGE0_DELTA_NON_L4		GENMASK(30, 16)
+ #define PPE_BIND_AGE0_DELTA_UDP			GENMASK(14, 0)
+@@ -340,6 +361,11 @@
+ #define PPE_SRAM_HASH0_MODE_MASK		GENMASK(7, 4)
+ #define PPE_SRAM_TABLE_EN_MASK			BIT(0)
+ 
++#define REG_PPE_TPID_CFG(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x288)
++#define PPE_TPID_CFG_DEFAULT			0x001d077f
++#define REG_PPE_TPID_EN(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x28c)
++#define REG_PPE_TPID_VAL(_n, _m)		(((_n) ? PPE2_BASE : PPE1_BASE) + 0x2d0 + ((_m) << 2))
++
+ #define REG_PPE_MTU_BASE(_n)			(((_n) ? PPE2_BASE : PPE1_BASE) + 0x304)
+ #define REG_PPE_MTU(_m, _n)			(REG_PPE_MTU_BASE(_m) + (((_n) / 2) << 2))
+ #define FP_EGRESS_MTU_MASK(_n)			GENMASK(13 + (((_n) % 2) << 4), ((_n) % 2) << 4)

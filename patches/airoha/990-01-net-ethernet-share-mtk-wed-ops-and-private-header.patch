@@ -1,0 +1,593 @@
+--- a/drivers/net/ethernet/Kconfig
++++ b/drivers/net/ethernet/Kconfig
+@@ -15,6 +15,9 @@ if ETHERNET
+ config MDIO
+ 	tristate
+ 
++config NET_MEDIATEK_WED_COMMON
++	bool
++
+ source "drivers/net/ethernet/3com/Kconfig"
+ source "drivers/net/ethernet/actions/Kconfig"
+ source "drivers/net/ethernet/adaptec/Kconfig"
+--- a/drivers/net/ethernet/Makefile
++++ b/drivers/net/ethernet/Makefile
+@@ -11,6 +11,7 @@ obj-$(CONFIG_GRETH) += aeroflex/
+ obj-$(CONFIG_NET_VENDOR_ADI) += adi/
+ obj-$(CONFIG_NET_VENDOR_AGERE) += agere/
+ obj-$(CONFIG_NET_VENDOR_AIROHA) += airoha/
++obj-$(CONFIG_NET_MEDIATEK_WED_COMMON) += mtk_wed_ops.o
+ obj-$(CONFIG_NET_VENDOR_ALACRITECH) += alacritech/
+ obj-$(CONFIG_NET_VENDOR_ALLWINNER) += allwinner/
+ obj-$(CONFIG_NET_VENDOR_ALTEON) += alteon/
+--- a/drivers/net/ethernet/mediatek/Kconfig
++++ b/drivers/net/ethernet/mediatek/Kconfig
+@@ -10,6 +10,7 @@ if NET_VENDOR_MEDIATEK
+ config NET_MEDIATEK_SOC_WED
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
+ 	def_bool NET_MEDIATEK_SOC != n
++	select NET_MEDIATEK_WED_COMMON
+ 
+ config NET_MEDIATEK_SOC
+ 	tristate "MediaTek SoC Gigabit Ethernet support"
+--- a/drivers/net/ethernet/mediatek/Makefile
++++ b/drivers/net/ethernet/mediatek/Makefile
+@@ -9,5 +9,4 @@ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) +
+ ifdef CONFIG_DEBUG_FS
+ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_debugfs.o
+ endif
+-obj-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_ops.o
+ obj-$(CONFIG_NET_MEDIATEK_STAR_EMAC) += mtk_star_emac.o
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -2774,33 +2774,34 @@ mtk_wed_setup_tc(struct mtk_wed_device *
+ 	}
+ }
+ 
++static const struct mtk_wed_ops mtk_wed_ops = {
++	.attach = mtk_wed_attach,
++	.tx_ring_setup = mtk_wed_tx_ring_setup,
++	.rx_ring_setup = mtk_wed_rx_ring_setup,
++	.txfree_ring_setup = mtk_wed_txfree_ring_setup,
++	.msg_update = mtk_wed_mcu_msg_update,
++	.start = mtk_wed_start,
++	.stop = mtk_wed_stop,
++	.reset_dma = mtk_wed_reset_dma,
++	.reg_read = wed_r32,
++	.reg_write = wed_w32,
++	.irq_get = mtk_wed_irq_get,
++	.irq_set_mask = mtk_wed_irq_set_mask,
++	.detach = mtk_wed_detach,
++	.ppe_check = mtk_wed_ppe_check,
++	.setup_tc = mtk_wed_setup_tc,
++	.start_hw_rro = mtk_wed_start_hw_rro,
++	.rro_rx_ring_setup = mtk_wed_rro_rx_ring_setup,
++	.msdu_pg_rx_ring_setup = mtk_wed_msdu_pg_rx_ring_setup,
++	.ind_rx_ring_setup = mtk_wed_ind_rx_ring_setup,
++	.flow_flush = mtk_wed_flow_flush,
++	.flow_idle = mtk_wed_flow_idle,
++};
++
+ void mtk_wed_add_hw(struct device_node *np, struct mtk_eth *eth,
+ 		    void __iomem *wdma, phys_addr_t wdma_phy,
+ 		    int index)
+ {
+-	static const struct mtk_wed_ops wed_ops = {
+-		.attach = mtk_wed_attach,
+-		.tx_ring_setup = mtk_wed_tx_ring_setup,
+-		.rx_ring_setup = mtk_wed_rx_ring_setup,
+-		.txfree_ring_setup = mtk_wed_txfree_ring_setup,
+-		.msg_update = mtk_wed_mcu_msg_update,
+-		.start = mtk_wed_start,
+-		.stop = mtk_wed_stop,
+-		.reset_dma = mtk_wed_reset_dma,
+-		.reg_read = wed_r32,
+-		.reg_write = wed_w32,
+-		.irq_get = mtk_wed_irq_get,
+-		.irq_set_mask = mtk_wed_irq_set_mask,
+-		.detach = mtk_wed_detach,
+-		.ppe_check = mtk_wed_ppe_check,
+-		.setup_tc = mtk_wed_setup_tc,
+-		.start_hw_rro = mtk_wed_start_hw_rro,
+-		.rro_rx_ring_setup = mtk_wed_rro_rx_ring_setup,
+-		.msdu_pg_rx_ring_setup = mtk_wed_msdu_pg_rx_ring_setup,
+-		.ind_rx_ring_setup = mtk_wed_ind_rx_ring_setup,
+-		.flow_flush = mtk_wed_flow_flush,
+-		.flow_idle = mtk_wed_flow_idle,
+-	};
+ 	struct device_node *eth_np = eth->dev->of_node;
+ 	struct platform_device *pdev;
+ 	struct mtk_wed_hw *hw;
+@@ -2820,8 +2821,6 @@ void mtk_wed_add_hw(struct device_node *
+ 	if (IS_ERR(regs))
+ 		goto err_put_device;
+ 
+-	rcu_assign_pointer(mtk_soc_wed_ops, &wed_ops);
+-
+ 	mutex_lock(&hw_lock);
+ 
+ 	if (WARN_ON(hw_list[index]))
+@@ -2870,6 +2869,12 @@ void mtk_wed_add_hw(struct device_node *
+ 	mtk_wed_hw_add_debugfs(hw);
+ 
+ 	hw_list[index] = hw;
++	if (mtk_wed_ops_register(&mtk_wed_ops)) {
++		hw_list[index] = NULL;
++		debugfs_remove(hw->debugfs_dir);
++		kfree(hw);
++		goto unlock;
++	}
+ 
+ 	mutex_unlock(&hw_lock);
+ 
+@@ -2887,9 +2892,7 @@ void mtk_wed_exit(void)
+ {
+ 	int i;
+ 
+-	rcu_assign_pointer(mtk_soc_wed_ops, NULL);
+-
+-	synchronize_rcu();
++	mtk_wed_ops_unregister(&mtk_wed_ops);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(hw_list); i++) {
+ 		struct mtk_wed_hw *hw;
+--- a/drivers/net/ethernet/mediatek/mtk_wed.h
++++ b/drivers/net/ethernet/mediatek/mtk_wed.h
+@@ -4,54 +4,7 @@
+ #ifndef __MTK_WED_PRIV_H
+ #define __MTK_WED_PRIV_H
+ 
+-#include <linux/soc/mediatek/mtk_wed.h>
+-#include <linux/debugfs.h>
+-#include <linux/regmap.h>
+-#include <linux/netdevice.h>
+-
+-#include "mtk_wed_regs.h"
+-
+-struct mtk_eth;
+-struct mtk_wed_wo;
+-
+-struct mtk_wed_soc_data {
+-	struct {
+-		u32 tx_bm_tkid;
+-		u32 wpdma_rx_ring[MTK_WED_RX_QUEUES];
+-		u32 reset_idx_tx_mask;
+-		u32 reset_idx_rx_mask;
+-	} regmap;
+-	u32 tx_ring_desc_size;
+-	u32 wdma_desc_size;
+-};
+-
+-struct mtk_wed_amsdu {
+-	void *txd;
+-	dma_addr_t txd_phy;
+-};
+-
+-struct mtk_wed_hw {
+-	const struct mtk_wed_soc_data *soc;
+-	struct device_node *node;
+-	struct mtk_eth *eth;
+-	struct regmap *regs;
+-	struct regmap *hifsys;
+-	struct device *dev;
+-	void __iomem *wdma;
+-	phys_addr_t wdma_phy;
+-	struct regmap *mirror;
+-	struct dentry *debugfs_dir;
+-	struct mtk_wed_device *wed_dev;
+-	struct mtk_wed_wo *wed_wo;
+-	struct mtk_wed_amsdu *wed_amsdu;
+-	u32 pcie_base;
+-	u32 debugfs_reg;
+-	u32 num_flows;
+-	u8 version;
+-	char dirname[5];
+-	int irq;
+-	int index;
+-};
++#include "../mtk_wed_private.h"
+ 
+ struct mtk_wdma_info {
+ 	u8 wdma_idx;
+@@ -61,109 +14,6 @@ struct mtk_wdma_info {
+ 	u8 amsdu;
+ };
+ 
+-#ifdef CONFIG_NET_MEDIATEK_SOC_WED
+-static inline bool mtk_wed_is_v1(struct mtk_wed_hw *hw)
+-{
+-	return hw->version == 1;
+-}
+-
+-static inline bool mtk_wed_is_v2(struct mtk_wed_hw *hw)
+-{
+-	return hw->version == 2;
+-}
+-
+-static inline bool mtk_wed_is_v3(struct mtk_wed_hw *hw)
+-{
+-	return hw->version == 3;
+-}
+-
+-static inline bool mtk_wed_is_v3_or_greater(struct mtk_wed_hw *hw)
+-{
+-	return hw->version > 2;
+-}
+-
+-static inline void
+-wed_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
+-{
+-	regmap_write(dev->hw->regs, reg, val);
+-}
+-
+-static inline u32
+-wed_r32(struct mtk_wed_device *dev, u32 reg)
+-{
+-	unsigned int val;
+-
+-	regmap_read(dev->hw->regs, reg, &val);
+-
+-	return val;
+-}
+-
+-static inline void
+-wdma_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
+-{
+-	writel(val, dev->hw->wdma + reg);
+-}
+-
+-static inline u32
+-wdma_r32(struct mtk_wed_device *dev, u32 reg)
+-{
+-	return readl(dev->hw->wdma + reg);
+-}
+-
+-static inline u32
+-wpdma_tx_r32(struct mtk_wed_device *dev, int ring, u32 reg)
+-{
+-	if (!dev->tx_ring[ring].wpdma)
+-		return 0;
+-
+-	return readl(dev->tx_ring[ring].wpdma + reg);
+-}
+-
+-static inline void
+-wpdma_tx_w32(struct mtk_wed_device *dev, int ring, u32 reg, u32 val)
+-{
+-	if (!dev->tx_ring[ring].wpdma)
+-		return;
+-
+-	writel(val, dev->tx_ring[ring].wpdma + reg);
+-}
+-
+-static inline u32
+-wpdma_rx_r32(struct mtk_wed_device *dev, int ring, u32 reg)
+-{
+-	if (!dev->rx_ring[ring].wpdma)
+-		return 0;
+-
+-	return readl(dev->rx_ring[ring].wpdma + reg);
+-}
+-
+-static inline void
+-wpdma_rx_w32(struct mtk_wed_device *dev, int ring, u32 reg, u32 val)
+-{
+-	if (!dev->rx_ring[ring].wpdma)
+-		return;
+-
+-	writel(val, dev->rx_ring[ring].wpdma + reg);
+-}
+-
+-static inline u32
+-wpdma_txfree_r32(struct mtk_wed_device *dev, u32 reg)
+-{
+-	if (!dev->txfree_ring.wpdma)
+-		return 0;
+-
+-	return readl(dev->txfree_ring.wpdma + reg);
+-}
+-
+-static inline void
+-wpdma_txfree_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
+-{
+-	if (!dev->txfree_ring.wpdma)
+-		return;
+-
+-	writel(val, dev->txfree_ring.wpdma + reg);
+-}
+-
+ static inline u32 mtk_wed_get_pcie_base(struct mtk_wed_device *dev)
+ {
+ 	if (!mtk_wed_is_v3_or_greater(dev->hw))
+@@ -179,6 +29,8 @@ static inline u32 mtk_wed_get_pcie_base(
+ 	}
+ }
+ 
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_SOC_WED)
++
+ void mtk_wed_add_hw(struct device_node *np, struct mtk_eth *eth,
+ 		    void __iomem *wdma, phys_addr_t wdma_phy,
+ 		    int index);
+--- a/drivers/net/ethernet/mediatek/mtk_wed_ops.c
++++ /dev/null
+@@ -1,8 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0-only
+-/* Copyright (C) 2020 Felix Fietkau <nbd@nbd.name> */
+-
+-#include <linux/kernel.h>
+-#include <linux/soc/mediatek/mtk_wed.h>
+-
+-const struct mtk_wed_ops __rcu *mtk_soc_wed_ops;
+-EXPORT_SYMBOL_GPL(mtk_soc_wed_ops);
+--- /dev/null
++++ b/drivers/net/ethernet/mtk_wed_ops.c
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Copyright (C) 2020 Felix Fietkau <nbd@nbd.name> */
++
++#include <linux/kernel.h>
++#include <linux/mutex.h>
++#include <linux/rcupdate.h>
++#include <linux/soc/mediatek/mtk_wed.h>
++
++const struct mtk_wed_ops __rcu *mtk_soc_wed_ops;
++EXPORT_SYMBOL_GPL(mtk_soc_wed_ops);
++
++static DEFINE_MUTEX(mtk_wed_ops_mutex);
++
++int mtk_wed_ops_register(const struct mtk_wed_ops *ops)
++{
++	const struct mtk_wed_ops *cur;
++	int ret = 0;
++
++	mutex_lock(&mtk_wed_ops_mutex);
++	cur = rcu_dereference_protected(mtk_soc_wed_ops,
++					lockdep_is_held(&mtk_wed_ops_mutex));
++	if (cur && cur != ops)
++		ret = -EBUSY;
++	else if (!cur)
++		rcu_assign_pointer(mtk_soc_wed_ops, ops);
++	mutex_unlock(&mtk_wed_ops_mutex);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_wed_ops_register);
++
++void mtk_wed_ops_unregister(const struct mtk_wed_ops *ops)
++{
++	const struct mtk_wed_ops *cur;
++	bool removed = false;
++
++	mutex_lock(&mtk_wed_ops_mutex);
++	cur = rcu_dereference_protected(mtk_soc_wed_ops,
++					lockdep_is_held(&mtk_wed_ops_mutex));
++	if (cur == ops) {
++		RCU_INIT_POINTER(mtk_soc_wed_ops, NULL);
++		removed = true;
++	}
++	mutex_unlock(&mtk_wed_ops_mutex);
++
++	if (removed)
++		synchronize_rcu();
++}
++EXPORT_SYMBOL_GPL(mtk_wed_ops_unregister);
+--- /dev/null
++++ b/drivers/net/ethernet/mtk_wed_private.h
+@@ -0,0 +1,163 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright (C) 2021 Felix Fietkau <nbd@nbd.name> */
++
++#ifndef __MTK_WED_COMMON_PRIV_H
++#define __MTK_WED_COMMON_PRIV_H
++
++#include <linux/debugfs.h>
++#include <linux/netdevice.h>
++#include <linux/of.h>
++#include <linux/regmap.h>
++#include <linux/soc/mediatek/mtk_wed.h>
++
++#include "mediatek/mtk_wed_regs.h"
++
++struct mtk_eth;
++struct airoha_eth;
++struct mtk_wed_wo;
++
++struct mtk_wed_soc_data {
++	struct {
++		u32 tx_bm_tkid;
++		u32 wpdma_rx_ring[MTK_WED_RX_QUEUES];
++		u32 reset_idx_tx_mask;
++		u32 reset_idx_rx_mask;
++	} regmap;
++	u32 tx_ring_desc_size;
++	u32 wdma_desc_size;
++};
++
++struct mtk_wed_amsdu {
++	void *txd;
++	dma_addr_t txd_phy;
++};
++
++struct mtk_wed_hw {
++	const struct mtk_wed_soc_data *soc;
++	struct device_node *node;
++	struct mtk_eth *eth;
++	struct airoha_eth *airoha;
++	struct regmap *regs;
++	struct regmap *hifsys;
++	struct device *dev;
++	void __iomem *pcie;
++	void __iomem *wdma;
++	phys_addr_t wdma_phy;
++	struct regmap *mirror;
++	struct dentry *debugfs_dir;
++	struct mtk_wed_device *wed_dev;
++	struct mtk_wed_wo *wed_wo;
++	struct mtk_wed_amsdu *wed_amsdu;
++	u32 pcie_base;
++	u32 debugfs_reg;
++	u32 irq_mask;
++	u32 num_flows;
++	u8 version;
++	char dirname[5];
++	int irq;
++	int index;
++};
++
++static inline bool mtk_wed_is_v1(struct mtk_wed_hw *hw)
++{
++	return hw->version == 1;
++}
++
++static inline bool mtk_wed_is_v2(struct mtk_wed_hw *hw)
++{
++	return hw->version == 2;
++}
++
++static inline bool mtk_wed_is_v3(struct mtk_wed_hw *hw)
++{
++	return hw->version == 3;
++}
++
++static inline bool mtk_wed_is_v3_or_greater(struct mtk_wed_hw *hw)
++{
++	return hw->version > 2;
++}
++
++static inline void
++wed_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
++{
++	regmap_write(dev->hw->regs, reg, val);
++}
++
++static inline u32
++wed_r32(struct mtk_wed_device *dev, u32 reg)
++{
++	unsigned int val;
++
++	regmap_read(dev->hw->regs, reg, &val);
++
++	return val;
++}
++
++static inline void
++wdma_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
++{
++	writel(val, dev->hw->wdma + reg);
++}
++
++static inline u32
++wdma_r32(struct mtk_wed_device *dev, u32 reg)
++{
++	return readl(dev->hw->wdma + reg);
++}
++
++static inline u32
++wpdma_tx_r32(struct mtk_wed_device *dev, int ring, u32 reg)
++{
++	if (!dev->tx_ring[ring].wpdma)
++		return 0;
++
++	return readl(dev->tx_ring[ring].wpdma + reg);
++}
++
++static inline void
++wpdma_tx_w32(struct mtk_wed_device *dev, int ring, u32 reg, u32 val)
++{
++	if (!dev->tx_ring[ring].wpdma)
++		return;
++
++	writel(val, dev->tx_ring[ring].wpdma + reg);
++}
++
++static inline u32
++wpdma_rx_r32(struct mtk_wed_device *dev, int ring, u32 reg)
++{
++	if (!dev->rx_ring[ring].wpdma)
++		return 0;
++
++	return readl(dev->rx_ring[ring].wpdma + reg);
++}
++
++static inline void
++wpdma_rx_w32(struct mtk_wed_device *dev, int ring, u32 reg, u32 val)
++{
++	if (!dev->rx_ring[ring].wpdma)
++		return;
++
++	writel(val, dev->rx_ring[ring].wpdma + reg);
++}
++
++static inline u32
++wpdma_txfree_r32(struct mtk_wed_device *dev, u32 reg)
++{
++	if (!dev->txfree_ring.wpdma)
++		return 0;
++
++	return readl(dev->txfree_ring.wpdma + reg);
++}
++
++static inline void
++wpdma_txfree_w32(struct mtk_wed_device *dev, u32 reg, u32 val)
++{
++	if (!dev->txfree_ring.wpdma)
++		return;
++
++	writel(val, dev->txfree_ring.wpdma + reg);
++}
++
++#endif
+--- a/include/linux/soc/mediatek/mtk_wed.h
++++ b/include/linux/soc/mediatek/mtk_wed.h
+@@ -83,7 +83,7 @@ struct mtk_wed_buf {
+ };
+ 
+ struct mtk_wed_device {
+-#ifdef CONFIG_NET_MEDIATEK_SOC_WED
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_WED_COMMON)
+ 	const struct mtk_wed_ops *ops;
+ 	struct device *dev;
+ 	struct mtk_wed_hw *hw;
+@@ -228,13 +228,15 @@ struct mtk_wed_ops {
+ };
+ 
+ extern const struct mtk_wed_ops __rcu *mtk_soc_wed_ops;
++int mtk_wed_ops_register(const struct mtk_wed_ops *ops);
++void mtk_wed_ops_unregister(const struct mtk_wed_ops *ops);
+ 
+ static inline int
+ mtk_wed_device_attach(struct mtk_wed_device *dev)
+ {
+ 	int ret = -ENODEV;
+ 
+-#ifdef CONFIG_NET_MEDIATEK_SOC_WED
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_WED_COMMON)
+ 	rcu_read_lock();
+ 	dev->ops = rcu_dereference(mtk_soc_wed_ops);
+ 	if (dev->ops)
+@@ -251,7 +253,7 @@ mtk_wed_device_attach(struct mtk_wed_dev
+ 
+ static inline bool mtk_wed_get_rx_capa(struct mtk_wed_device *dev)
+ {
+-#ifdef CONFIG_NET_MEDIATEK_SOC_WED
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_WED_COMMON)
+ 	if (dev->version == 3)
+ 		return dev->wlan.hw_rro;
+ 
+@@ -263,14 +265,14 @@ static inline bool mtk_wed_get_rx_capa(s
+ 
+ static inline bool mtk_wed_is_amsdu_supported(struct mtk_wed_device *dev)
+ {
+-#ifdef CONFIG_NET_MEDIATEK_SOC_WED
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_WED_COMMON)
+ 	return dev->version == 3;
+ #else
+ 	return false;
+ #endif
+ }
+ 
+-#ifdef CONFIG_NET_MEDIATEK_SOC_WED
++#if IS_ENABLED(CONFIG_NET_MEDIATEK_WED_COMMON)
+ #define mtk_wed_device_active(_dev) !!(_dev)->ops
+ #define mtk_wed_device_detach(_dev) (_dev)->ops->detach(_dev)
+ #define mtk_wed_device_start(_dev, _mask) (_dev)->ops->start(_dev, _mask)

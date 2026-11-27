@@ -283,66 +283,72 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   # ---------------------------------------------------------
   # 内核 Kconfig 符号必须写进「目标 config」，不能只写 .config
   #
-  # target/linux/airoha/an7581/config-6.18 是内核配置的基座。工作流追加到
-  # TOPDIR/.config 的 CONFIG_NET_* 会在 kernel_oldconfig 阶段被基座里的
-  # `# CONFIG_NET_VENDOR_MEDIATEK is not set` 覆盖掉，而 952 只改 Kconfig
-  # 依赖（ARCH_AIROHA 可选中），并不会替我们把符号选中。
-  # 首次构建实测后果：CONFIG_NET_MEDIATEK_SOC_WED 未生效 →
-  # struct mtk_wed_device 的成员全被 #ifdef 摘掉 →
-  # mt7915/main.c 报 'has no member named wdma_idx'，mt76 整个包编译失败。
+  # target/linux/airoha/an7581/config-6.18 是内核配置的基座；追加到
+  # TOPDIR/.config 的 CONFIG_NET_* 会在 kernel_oldconfig 阶段被基座覆盖。
+  #
+  # 本套实现（wed-cpu-ppe）只依赖两个符号，且都不在 NET_VENDOR_MEDIATEK
+  # 菜单下，因此不需要打开 MediaTek 厂商菜单（那会把整张菜单变可见，
+  # 未回答的符号变成 kconfig 的 (NEW) 交互提示，syncconfig 无 stdin 直接
+  # 报错——之前为此连挂两次构建）：
+  #   NET_AIROHA_SOC_WED        bool，990-02 在 airoha/Kconfig 里定义，
+  #                             select NET_MEDIATEK_WED_COMMON
+  #   NET_MEDIATEK_WED_COMMON   990-01 在 drivers/net/ethernet/Kconfig 顶层
+  #                             定义，负责编 mtk_wed_ops.o 并让
+  #                             struct mtk_wed_device 有内容
   # ---------------------------------------------------------
   KCONFIG="target/linux/airoha/an7581/config-6.18"
   if [ -f "$KCONFIG" ]; then
-    sed -i 's/^# CONFIG_NET_VENDOR_MEDIATEK is not set$/CONFIG_NET_VENDOR_MEDIATEK=y/' "$KCONFIG"
-    sed -i 's/^# CONFIG_NET_MEDIATEK_SOC_WED is not set$/CONFIG_NET_MEDIATEK_SOC_WED=y/' "$KCONFIG"
-    grep -q '^CONFIG_NET_VENDOR_MEDIATEK=y$' "$KCONFIG" || \
-      echo 'CONFIG_NET_VENDOR_MEDIATEK=y' >> "$KCONFIG"
-    grep -q '^CONFIG_NET_MEDIATEK_SOC_WED=y$' "$KCONFIG" || \
-      echo 'CONFIG_NET_MEDIATEK_SOC_WED=y' >> "$KCONFIG"
-    # NET_VENDOR_MEDIATEK=y 会让整个 MediaTek 厂商菜单变可见，其中没被回答过
-    # 的符号就成了 kconfig 的 (NEW) 交互提示；OpenWrt 的 syncconfig 没有输入，
-    # 于是直接
-    #   MediaTek SoC Gigabit Ethernet support (NET_MEDIATEK_SOC) [N/m/y/?] (NEW)
-    #   make[8]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1
-    # 编译还没开始就挂。该菜单下只有这三个符号，全部给成明确答案：
-    #   NET_MEDIATEK_SOC 保持关（952 只为 ops-only 导出 mtk_soc_wed_ops），
-    #   NET_MEDIATEK_STAR_EMAC 本机不用。
-    # ⚠ 必须带 CONFIG_ 前缀：kconfig 只认 "# CONFIG_X is not set" 这种写法，
-    #   写成 "# X is not set" 会被无视，符号照样是 (NEW) 交互提示（踩过一次）。
-    for sym in CONFIG_NET_MEDIATEK_SOC CONFIG_NET_MEDIATEK_STAR_EMAC; do
-      sed -i "s/^${sym}=[ym]$/# ${sym} is not set/" "$KCONFIG"
-      grep -qxF "# ${sym} is not set" "$KCONFIG" || \
-        echo "# ${sym} is not set" >> "$KCONFIG"
+    for sym in CONFIG_NET_AIROHA_SOC_WED CONFIG_NET_MEDIATEK_WED_COMMON; do
+      sed -i "s/^# ${sym} is not set$/${sym}=y/" "$KCONFIG"
+      sed -i "s/^${sym}=[ym]$/${sym}=y/" "$KCONFIG"
+      grep -qxF "${sym}=y" "$KCONFIG" || echo "${sym}=y" >> "$KCONFIG"
     done
-    echo "✅ 内核目标配置已启用 WED："
-    grep -nE "NET_VENDOR_MEDIATEK|NET_MEDIATEK_SOC|NET_MEDIATEK_STAR_EMAC|NET_AIROHA_NPU" "$KCONFIG"
+    # 旧方案残留：这三项是我方 952 的写法，本套不再需要，且会重新激活
+    # MediaTek 厂商菜单（连带 (NEW) 提示），一并清掉。
+    for sym in CONFIG_NET_MEDIATEK_SOC_WED CONFIG_NET_VENDOR_MEDIATEK \
+               CONFIG_NET_MEDIATEK_SOC CONFIG_NET_MEDIATEK_STAR_EMAC; do
+      sed -i "s/^${sym}=[ym]$/# ${sym} is not set/" "$KCONFIG"
+    done
+    echo "✅ 内核目标配置（WED）："
+    grep -nE "NET_AIROHA_SOC_WED|NET_MEDIATEK_WED_COMMON|NET_AIROHA_NPU|NET_VENDOR_MEDIATEK|NET_MEDIATEK_SOC" "$KCONFIG"
   else
     echo "::warning::未找到内核目标配置 $KCONFIG（WED 符号将不生效）"
   fi
 
   # ---------------------------------------------------------
-  # 内核补丁：AN7581 WED v1 TX + MT7916 NPU RX（厂商 98K 固件）
+  # 内核补丁：AN7581 WED v1 TX + PPE（供应商 wed-cpu-ppe 方案）
   #
-  # 来源：wuziwei/ponwrt-ZN504-HG5585F 分支
-  #       feat/hg5585f-wed-npu-offload-6.18（提交 c8fc3037）
-  # 该分支与我们同为 ponwrt 基座、同为 Linux 6.18，补丁已验证可在
-  # 我们的 6.18.60 树上（叠加 931/932/941-02/947/951 之后）干净应用：
-  #   952 允许 NET_MEDIATEK_SOC_WED 在 ARCH_AIROHA 上只编 mtk_wed_ops.o
-  #   953 新增 airoha_wed.c（AN7581 WED v1 TX）+ eth/ppe 挂接
-  #   954 airoha_npu.c：MT7916 RX-only 模式（hostadpt 环）+ fw_version 缓存
-  # 941-01 是 954 的前置（提供 npu->fw_version 缓存字段），必须一并注入。
+  # 来源：参考实现 wed-cpu-ppe.diff（同 ponwrt 基座、同 Linux 6.18）。
+  # 本机 6.18.60 上前置 931/932/941-02/947/951 之后，按下列顺序应用：
+  #   400      airoha_npu.c：tx-bufid / tx-pkt 内存区改为「DTS 有才下发」，
+  #            MT7916 这类 RX-only 设计不必为其分配内存，也不会 probe 失败
+  #   990-01   新增 NET_MEDIATEK_WED_COMMON（ethernet 顶层，无厂商依赖），
+  #            mtk_wed_ops.o 挪到 drivers/net/ethernet/，增加带互斥的
+  #            mtk_wed_ops_register/unregister，抽出 mtk_wed_private.h
+  #            （其中 mtk_wed_hw 增加 struct airoha_eth *airoha）
+  #   990-02   新增 NET_AIROHA_SOC_WED + airoha_wed.c/h/_debugfs.c：
+  #            AN7581 WED v1 TX 后端（PPE→PSE port3→WDMA→WED）
+  #   991      AN7581 的 PPE 改由 CPU 直接初始化（hw_initialized 本地置位），
+  #            PPE 不再依赖 NPU 完成 offload_setup
   #
-  # 我们此前自研的 400/404/943 已被 954 取代（同样的内存区可选逻辑 +
-  # 正式的 RX hostadpt 通路），不再注入，避免两套实现互相打架。
+  # 与旧方案（952/953/954，来自 wuziwei 的 HG5585F 分支）的关系：
+  # 二者不能共存——952 与 990-01 抢同一个 mediatek/Kconfig，且 952 需要把
+  # NET_MEDIATEK_SOC_WED 塞给 ARCH_AIROHA，会连带激活整张 MediaTek 厂商
+  # 菜单产生 kconfig (NEW) 交互提示（syncconfig 无 stdin，直接构建失败，
+  # 我们为此连挂两次）。本套用独立符号，彻底绕开。
+  #
+  # 方向差异：本套覆盖 下行（PON→WiFi）WED TX 卸载 + PPE 硬件转发；
+  # 上行（WiFi→PON）的 RX 仍走 PCIe 到 CPU。旧 954 是上行 NPU RX，但
+  # 多轮实测始终不产帧，故放弃。
   # NPU_LEGACY_ABI 开关保留但不再影响注入（legacy ABI 路线已证伪）。
   # ---------------------------------------------------------
   KVER="$(sed -n 's/^KERNEL_PATCHVER:=//p' target/linux/airoha/Makefile 2>/dev/null || echo 6.18)"
   KPATCH_DIR="target/linux/airoha/patches-${KVER}"
   if [ -d "$KPATCH_DIR" ]; then
-    for pn in 941-01-net-airoha-npu-expose-cached-firmware-info \
-              952-net-mediatek-wed-allow-airoha-ops-only \
-              953-net-airoha-add-an7581-wed-v1-tx-offload \
-              954-net-airoha-npu-mt7916-rx-and-hostadpt; do
+    for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
+              990-01-net-ethernet-share-mtk-wed-ops-and-private-header \
+              990-02-net-airoha-add-AN7581-WED-support \
+              991-net-airoha-ppe-direct-cpu-programming-for-AN7581; do
       src=""
       [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ] && \
         src="$GITHUB_WORKSPACE/patches/airoha/$pn.patch"
@@ -361,17 +367,20 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   fi
 
   # ---------------------------------------------------------
-  # mt76 补丁：AN7581 dual-PCIe WED + MT7916 NPU RX
-  # 来源同上分支（wuziwei/ponwrt-ZN504-HG5585F）：
-  #   120 connac2 兼容层
-  #   121 mt7915 npu.c 双 PCIe WED + NPU RX
-  # 二者取代我们此前的 402/405（Sirherobrine23/mt76 的早期版本）。
+  # mt76 补丁：启用 Airoha WED（来源同 wed-cpu-ppe.diff）
+  #   120     dma/connac/wed 各处把内核判断从「仅 NET_MEDIATEK_SOC_WED」
+  #           扩成「MEDIATEK 或 AIROHA」，并给 MT7615 加 WED TX 卸载
+  #   121     MT7916 的 CTXD 与 TX 流控（WED 下必须，否则发送卡住）
+  #   122     mt7915 的 wed_enable 默认值改为 IS_ENABLED(NET_AIROHA_SOC_WED)
+  # 三者已在 openwrt/mt76@0936617d（本机构建实际使用的版本）上验证零 fuzz。
+  # 取代此前的 402/405 与 HG5585F 的 120/121。
   # ---------------------------------------------------------
   MT76_DIR="package/kernel/mt76"
   if [ -d "$MT76_DIR" ]; then
     mkdir -p "$MT76_DIR/patches"
-    for pn in 120-mt76-npu-connac2-compat \
-              121-mt7915-add-airoha-npu-rx-and-dual-pcie-wed; do
+    for pn in 120-wifi-mt76-enable-Airoha-WED-and-add-MT7615-transmit-offload \
+              121-mt7915-enable-CTXD-and-TX-flow-control-for-WED-on-MT7916 \
+              122-mt7915-default-enable-wed-for-airoha; do
       src="$GITHUB_WORKSPACE/patches/airoha/mt76/$pn.patch"
       if [ -f "$src" ]; then
         cp "$src" "$MT76_DIR/patches/$pn.patch"
@@ -380,15 +389,22 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
         echo "::warning::mt76 补丁缺失：$pn"
       fi
     done
-    # 包 Makefile 里加 MT7915_NPU 开关：m=mt76 编译 npu.o + mt7915 npu.o
-    if ! grep -q "MT7915_NPU" "$MT76_DIR/Makefile"; then
-      # 在 kmod-mt7915e 段的 CONFIG_MT7915E=m 之后插入 airoha 分支
-      perl -0pi -e 's/(  PKG_MAKE_FLAGS \+= CONFIG_MT7915E=m\n)(?!  ifdef CONFIG_TARGET_airoha)/$1  ifdef CONFIG_TARGET_airoha_an7581\n    PKG_MAKE_FLAGS += CONFIG_MT76_NPU=y\n    PKG_MAKE_FLAGS += CONFIG_MT7915_NPU=y\n    NOSTDINC_FLAGS += -DCONFIG_MT76_NPU\n    NOSTDINC_FLAGS += -DCONFIG_MT7915_NPU\n  endif\n/' "$MT76_DIR/Makefile"
+    # 包 Makefile：an7581 上把 wed_enable 设为 Y
+    #
+    # 122 已把 mt7915 的 wed_enable 默认值改成 IS_ENABLED(CONFIG_NET_AIROHA_SOC_WED)，
+    # 这里再补 MODPARAMS 与之对应，保证 insmod 时即开启（与参考实现一致）。
+    #
+    # 注意：不要启用 CONFIG_MT76_NPU / CONFIG_MT7915_NPU。那条是旧的 NPU RX
+    # 方案，mt76 根目录 npu.c 会调用 airoha_npu_wlan_* 系列函数，而内核只
+    # EXPORT_SYMBOL_GPL 了 airoha_npu_get/put，其余未导出，模块链接必然失败。
+    if ! grep -q "CONFIG_TARGET_airoha_an7581" "$MT76_DIR/Makefile"; then
+      sed -i 's|^ifneq ($(CONFIG_TARGET_mediatek_filogic)$(CONFIG_TARGET_mediatek_mt7622),)$|ifneq ($(CONFIG_TARGET_mediatek_filogic)$(CONFIG_TARGET_mediatek_mt7622)$(CONFIG_TARGET_airoha_an7581),)|' "$MT76_DIR/Makefile"
     fi
-    echo "✅ mt76 NPU 补丁已注入（含 Makefile MT7915_NPU 开关）"
+    grep -n "MODPARAMS.mt7915e" "$MT76_DIR/Makefile" | head -2
+    echo "✅ mt76 WED 补丁已注入（含 wed_enable=Y 的 MODPARAMS）"
     grep -A6 "kmod-mt7915e" "$MT76_DIR/Makefile" | head -8
   else
-    echo "::warning::mt76 NPU 补丁未注入（$MT76_DIR 或补丁缺失）"
+    echo "::warning::mt76 WED 补丁未注入（$MT76_DIR 或补丁缺失）"
   fi
 else
   echo "ℹ ADD_NPU_OFFLOAD != true，保持默认（无 WiFi 硬件转发）"

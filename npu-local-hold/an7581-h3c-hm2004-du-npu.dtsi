@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
-#include <dt-bindings/interrupt-controller/arm-gic.h>
 /*
- * H3C HM2004-DU —— AN7581 WED v1 TX + MT7916 NPU RX 叠加层
+ * H3C HM2004-DU —— AN7581 NPU 保留内存叠加层
  *
- * 来源：wuziwei/ponwrt-ZN504-HG5585F 分支
- *       feat/hg5585f-wed-npu-offload-6.18（target/linux/airoha/dts/
- *       an7581-npu-mt7916.dtsi，提交 c8fc3037）。
+ * 硬件转发本体由 990-01 / 990-02 / 991 三个内核补丁提供：
+ *   · wed0/wed1、wdma0/wdma1 节点以及 &eth 的 airoha,wed 引用
+ *     都由 990 补丁直接写进 target/linux/airoha/dts/an7581.dtsi。
+ *     这里不要再重复定义——同 /soc 下同名节点会撞 reg 与中断。
+ *   · PPE 由 991 在 AN7581 上改由 CPU 直接初始化（hw_initialized），
+ *     不再依赖 NPU 完成 PPE 初始化。
  *
- * 本机（H3C HM2004-DU）与该分支的 HG5585F 同为 AN7581 + MT7916，
- * 因此 WED0/WED1、WDMA0/WDMA1 的寄存器地址与 GIC 中断号完全一致，
- * 可以原样复用；仅 reserved-memory 沿用本机已验证能正常启动的布局
- * （npu-pkt@0x81000000 / npu-ba@0x90c06800）。
+ * 因此本文件只剩两件事：
+ *   1) NPU 固件的保留内存（pkt / ba；binary 由基座 dtsi 提供）
+ *   2) &npu 的固件名与内存区名
  *
- * 分工（对方实测）：
- *   B1 下行（PON→WiFi）：WED v1 TX，PPE → PSE port3 → WDMA → WED
- *   B2 上行（WiFi→PON）：厂商 98K MT7916 RX-only NPU 固件 + hostadpt 环
- *
- * 与旧版本的差别：不再需要 airoha,legacy-wlan-mailbox，也不再走我们
- * 自研的 402/405 mt76 补丁；RX 语义由 airoha,npu-mt7916-rx 触发。
+ * 内存布局沿用本机已验证可正常启动的方案：
+ *   npu-pkt @0x81000000 22MB、npu-ba @0x90c06800 2MB。
+ * 参考实现把这两块挪到 0x9e000000/0x9e800000，是为了避开 U-Boot 的
+ * loadaddr 0x85000000；本机当前布局实测无冲突，暂不改动。若 NPU
+ * probe 报内存异常，第一步就照抄成 0x9e000000/0x9e800000。
  */
 
 / {
@@ -44,52 +44,7 @@
 	memory-region = <&npu_binary>, <&npu_pkt>, <&npu_ba>;
 	memory-region-names = "binary", "pkt", "ba";
 
-	/* 厂商 98K RX-only 固件（files/lib/firmware/airoha/ 随镜像打包） */
+	/* 厂商 98K 固件（files/lib/firmware/airoha/ 随镜像打包） */
 	firmware-name = "airoha/en7581_MT7916_npu_rv32.bin",
 			"airoha/en7581_MT7916_npu_data.bin";
-
-	/* 启用 MT7916 RX-only 模式：hostadpt 环接管 WiFi 接收 */
-	airoha,npu-mt7916-rx;
-};
-
-&{/soc} {
-	wdma0: wdma@1fa06000 {
-		compatible = "airoha,an7581-wdma";
-		reg = <0x0 0x1fa06000 0x0 0x400>;
-		interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;
-		status = "okay";
-	};
-
-	wdma1: wdma@1fa06400 {
-		compatible = "airoha,an7581-wdma";
-		reg = <0x0 0x1fa06400 0x0 0x400>;
-		interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>;
-		status = "okay";
-	};
-
-	wed0: wed@1fa02000 {
-		compatible = "airoha,an7581-wed";
-		reg = <0x0 0x1fa02000 0x0 0xb00>;
-		interrupts = <GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>;
-		airoha,wdma = <&wdma0>;
-		airoha,wed-id = <0>;
-		status = "okay";
-	};
-
-	wed1: wed@1fa03000 {
-		compatible = "airoha,an7581-wed";
-		reg = <0x0 0x1fa03000 0x0 0xb00>;
-		interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;
-		airoha,wdma = <&wdma1>;
-		airoha,wed-id = <1>;
-		status = "okay";
-	};
-};
-
-&eth {
-	airoha,wed = <&wed0>, <&wed1>;
 };
