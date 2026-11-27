@@ -299,8 +299,23 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
       echo 'CONFIG_NET_VENDOR_MEDIATEK=y' >> "$KCONFIG"
     grep -q '^CONFIG_NET_MEDIATEK_SOC_WED=y$' "$KCONFIG" || \
       echo 'CONFIG_NET_MEDIATEK_SOC_WED=y' >> "$KCONFIG"
+    # NET_VENDOR_MEDIATEK=y 会让整个 MediaTek 厂商菜单变可见，其中没被回答过
+    # 的符号就成了 kconfig 的 (NEW) 交互提示；OpenWrt 的 syncconfig 没有输入，
+    # 于是直接
+    #   MediaTek SoC Gigabit Ethernet support (NET_MEDIATEK_SOC) [N/m/y/?] (NEW)
+    #   make[8]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1
+    # 编译还没开始就挂。该菜单下只有这三个符号，全部给成明确答案：
+    #   NET_MEDIATEK_SOC 保持关（952 只为 ops-only 导出 mtk_soc_wed_ops），
+    #   NET_MEDIATEK_STAR_EMAC 本机不用。
+    for sym in NET_MEDIATEK_SOC NET_MEDIATEK_STAR_EMAC; do
+      if grep -q "^${sym}=y$" "$KCONFIG"; then
+        sed -i "s/^${sym}=y$/# ${sym} is not set/" "$KCONFIG"
+      elif ! grep -q "^# ${sym} is not set$" "$KCONFIG"; then
+        echo "# ${sym} is not set" >> "$KCONFIG"
+      fi
+    done
     echo "✅ 内核目标配置已启用 WED："
-    grep -nE "NET_VENDOR_MEDIATEK|NET_MEDIATEK_SOC_WED|NET_AIROHA_NPU" "$KCONFIG"
+    grep -nE "NET_VENDOR_MEDIATEK|NET_MEDIATEK_SOC|NET_AIROHA_NPU" "$KCONFIG"
   else
     echo "::warning::未找到内核目标配置 $KCONFIG（WED 符号将不生效）"
   fi
