@@ -281,88 +281,65 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   fi
 
   # ---------------------------------------------------------
-  # 内核补丁：让 TX 侧内存区变成可选
+  # 内核补丁：AN7581 WED v1 TX + MT7916 NPU RX（厂商 98K 固件）
   #
-  # 上游 airoha_npu_wlan_init_memory() 无条件要求 tx-bufid / pkt / tx-pkt
-  # 三个内存区，缺一个就 probe 失败。但 MT7916 是 RX-only 设计，原厂 DTB
-  # 里根本没有 tx-pkt（TX 仍走 CPU）。补丁把 tx-bufid / tx-pkt 改成
-  # 「DTS 里有才下发」，这样既能让 MT7916 通过 probe，又不多占 64MB 内存。
+  # 来源：wuziwei/ponwrt-ZN504-HG5585F 分支
+  #       feat/hg5585f-wed-npu-offload-6.18（提交 c8fc3037）
+  # 该分支与我们同为 ponwrt 基座、同为 Linux 6.18，补丁已验证可在
+  # 我们的 6.18.60 树上（叠加 931/932/941-02/947/951 之后）干净应用：
+  #   952 允许 NET_MEDIATEK_SOC_WED 在 ARCH_AIROHA 上只编 mtk_wed_ops.o
+  #   953 新增 airoha_wed.c（AN7581 WED v1 TX）+ eth/ppe 挂接
+  #   954 airoha_npu.c：MT7916 RX-only 模式（hostadpt 环）+ fw_version 缓存
+  # 941-01 是 954 的前置（提供 npu->fw_version 缓存字段），必须一并注入。
+  #
+  # 我们此前自研的 400/404/943 已被 954 取代（同样的内存区可选逻辑 +
+  # 正式的 RX hostadpt 通路），不再注入，避免两套实现互相打架。
+  # NPU_LEGACY_ABI 开关保留但不再影响注入（legacy ABI 路线已证伪）。
   # ---------------------------------------------------------
   KVER="$(sed -n 's/^KERNEL_PATCHVER:=//p' target/linux/airoha/Makefile 2>/dev/null || echo 6.18)"
   KPATCH_DIR="target/linux/airoha/patches-${KVER}"
-  # 内核补丁：400（RX-only 内存区可选）+ 943（门铃写入顺序，两者不同区可共存）。
-  #
-  # 2026-11-26 实机结论（用 devmem 手工复现驱动启动序列）：
-  #   MT7916（ClankerNPU）固件【不】需要 legacy ABI，但【必须】拿到
-  #   MIB10 + BOOT_BASE + BOOT_CONFIG=0xff + TRIGGER 0->1 脉冲：
-  #     · 只给脉冲、不给 MIB10/BOOT_BASE（401 legacy 路径）→ 四核 PC 全 0，
-  #       固件根本没跑起来；
-  #     · 给全主线参数 → 1 秒后 MIB31=0xcccccccc，核 PC 落在固件镜像内；
-  #     · 此时手搓 WLAN_FUNC_GET_WAIT_NPU_VERSION 立即回 DONE、status=0。
-  #   即邮箱/消息布局双方一致，之前「固件不应答」是【启动时序】问题：
-  #   驱动在脉冲后 100ms 就查版本，固件还没完成 bring-up。
-  #
-  # 因此：401 legacy 路径废弃（保留补丁文件与开关，默认不注入），
-  #       非 legacy 注入 404（等 MIB31 签名 + 版本查询重试）。
-  #       942 与 404 改同一段代码，二者只注入其一。
   if [ -d "$KPATCH_DIR" ]; then
-    # 943: 邮箱命令必须在门铃之前写入（固件 ISR 读 CTRL3 判断是否等待）
-    for pn in 400-net-airoha-npu-support-wlan-rx-only-offload \
-              943-net-airoha-npu-command-before-doorbell; do
-      if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
-        cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
+    for pn in 941-01-net-airoha-npu-expose-cached-firmware-info \
+              952-net-mediatek-wed-allow-airoha-ops-only \
+              953-net-airoha-add-an7581-wed-v1-tx-offload \
+              954-net-airoha-npu-mt7916-rx-and-hostadpt; do
+      src=""
+      [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ] && \
+        src="$GITHUB_WORKSPACE/patches/airoha/$pn.patch"
+      [ -z "$src" ] && [ -f "$GITHUB_WORKSPACE/patches/airoha/ppe-fixes/$pn.patch" ] && \
+        src="$GITHUB_WORKSPACE/patches/airoha/ppe-fixes/$pn.patch"
+      if [ -n "$src" ]; then
+        cp "$src" "$KPATCH_DIR/$pn.patch"
         echo "✅ 内核补丁已注入：$pn"
       else
         echo "::warning::内核补丁缺失：$pn.patch"
       fi
     done
-
-    if [ "${NPU_LEGACY_ABI:-false}" = "true" ]; then
-      # 401: 只发 BOOT_CONFIG=0 + TRIGGER 脉冲、跳过 MIB/BOOT_BASE。
-      #      2026-11-26 实测：MT7916 固件因此完全起不来（四核 PC=0），
-      #      保留仅为可复现对照实验，正常构建不要打开。
-      pn=401-net-airoha-npu-legacy-bsp-abi
-      if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
-        cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
-        echo "⚠ 已注入 legacy ABI 补丁：$pn（实验对照：固件不会启动）"
-      fi
-    else
-      # 非 legacy：404 等 MIB31 bring-up 签名 + 版本查询重试
-      pn=404-net-airoha-npu-wait-for-firmware-bringup
-      if [ -f "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" ]; then
-        cp "$GITHUB_WORKSPACE/patches/airoha/$pn.patch" "$KPATCH_DIR/$pn.patch"
-        echo "✅ 内核补丁已注入：$pn（等 MIB31 签名 + 版本查询重试）"
-      else
-        echo "::warning::内核补丁缺失：$pn.patch"
-      fi
-      echo "ℹ 跳过 401 legacy ABI 补丁（实测该路径固件不启动）"
-    fi
+    echo "ℹ NPU_LEGACY_ABI=${NPU_LEGACY_ABI:-false}（legacy 路线已证伪，忽略）"
   else
     echo "::warning::未找到内核补丁目录 $KPATCH_DIR"
   fi
 
   # ---------------------------------------------------------
-  # mt76 补丁：mt7915 NPU 接收卸载（来源 Sirherobrine23/mt76
-  # 分支 npu_en7523，已适配 EN7581 PCIe 基址 0x1fc0/0x1fc2 与
-  # 本地 chip-model 枚举）。
-  #
-  # OpenWrt 的 mt76 包按 quilt 规则读取 ./patches/*.patch，文件名
-  # 数字前缀决定顺序，所以直接放进包目录即可。
+  # mt76 补丁：AN7581 dual-PCIe WED + MT7916 NPU RX
+  # 来源同上分支（wuziwei/ponwrt-ZN504-HG5585F）：
+  #   120 connac2 兼容层
+  #   121 mt7915 npu.c 双 PCIe WED + NPU RX
+  # 二者取代我们此前的 402/405（Sirherobrine23/mt76 的早期版本）。
   # ---------------------------------------------------------
   MT76_DIR="package/kernel/mt76"
-  MT76_PATCH_SRC="$GITHUB_WORKSPACE/patches/airoha/402-mt76-mt7915-add-npu-rx-offload.patch"
-  # 405 是 402 的诊断叠加层（npu_rx 计数器挂点 + RX 环地址回读），
-  # 必须按数字顺序排在 402 之后。
-  MT76_DIAG_SRC="$GITHUB_WORKSPACE/patches/airoha/405-mt76-mt7915-npu-rx-diagnostics.patch"
-  if [ -d "$MT76_DIR" ] && [ -f "$MT76_PATCH_SRC" ]; then
+  if [ -d "$MT76_DIR" ]; then
     mkdir -p "$MT76_DIR/patches"
-    cp "$MT76_PATCH_SRC" "$MT76_DIR/patches/402-mt7915-add-npu-rx-offload.patch"
-    if [ -f "$MT76_DIAG_SRC" ]; then
-      cp "$MT76_DIAG_SRC" "$MT76_DIR/patches/405-mt7915-npu-rx-diagnostics.patch"
-      echo "✅ mt76 诊断补丁已注入：405（npu_rx 计数 + 环地址回读）"
-    else
-      echo "::warning::mt76 诊断补丁缺失：405"
-    fi
+    for pn in 120-mt76-npu-connac2-compat \
+              121-mt7915-add-airoha-npu-rx-and-dual-pcie-wed; do
+      src="$GITHUB_WORKSPACE/patches/airoha/mt76/$pn.patch"
+      if [ -f "$src" ]; then
+        cp "$src" "$MT76_DIR/patches/$pn.patch"
+        echo "✅ mt76 补丁已注入：$pn"
+      else
+        echo "::warning::mt76 补丁缺失：$pn"
+      fi
+    done
     # 包 Makefile 里加 MT7915_NPU 开关：m=mt76 编译 npu.o + mt7915 npu.o
     if ! grep -q "MT7915_NPU" "$MT76_DIR/Makefile"; then
       # 在 kmod-mt7915e 段的 CONFIG_MT7915E=m 之后插入 airoha 分支

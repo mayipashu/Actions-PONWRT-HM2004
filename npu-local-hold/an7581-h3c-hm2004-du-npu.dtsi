@@ -1,35 +1,23 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+#include <dt-bindings/interrupt-controller/arm-gic.h>
 /*
- * H3C HM2004-DU —— WiFi→PON 硬件转发（NPU RX 卸载）叠加层
+ * H3C HM2004-DU —— AN7581 WED v1 TX + MT7916 NPU RX 叠加层
  *
- * ============================================================
- * MT7916 版（step 3）：firmware-name + 主线 boot + 等 bring-up
- * ============================================================
+ * 来源：wuziwei/ponwrt-ZN504-HG5585F 分支
+ *       feat/hg5585f-wed-npu-offload-6.18（target/linux/airoha/dts/
+ *       an7581-npu-mt7916.dtsi，提交 c8fc3037）。
  *
- * 实测时间线（2026-11-19 → 2026-11-26）：
- *   11-19 保守版：上游标准流程 + 驱动内置 en7581_npu_rv32.bin
- *     （120KB MT7992 通用版）→ fw version 1456.62 / npu_attached: 1，
- *     但 MT7992 固件不含 kite 数据通路。
- *   11-26 step 1：换 ClankerNPU MT7916 专用固件、不设 legacy 属性 →
- *     驱动 100ms 后就查版本 → 超时 → mt7915 NPU RX 全断、WiFi 0 客户端。
- *   11-26 step 2：加 airoha,legacy-wlan-mailbox 走 401 legacy 脉冲 →
- *     四核 PC 全 0，固件根本没启动（更糟）。
- *   11-26 step 3（本版）用 devmem 手工复现驱动序列，定位到真因：
- *     · 只给 TRIGGER 脉冲、不给 MIB10/BOOT_BASE → 核 PC=0；
- *     · 给全 MIB10 + BOOT_BASE + BOOT_CONFIG=0xff + 脉冲 → 1 秒后
- *       MIB31=0xcccccccc、核 PC 落在固件镜像内；
- *     · 此时手搓 WLAN_FUNC_GET_WAIT_NPU_VERSION 立刻 DONE + status 0。
- *   结论：ABI/邮箱一致，问题是【启动时序】。故本版移除 legacy 属性，
- *   由 404 补丁轮询 MIB31 签名后再重试版本查询。
+ * 本机（H3C HM2004-DU）与该分支的 HG5585F 同为 AN7581 + MT7916，
+ * 因此 WED0/WED1、WDMA0/WDMA1 的寄存器地址与 GIC 中断号完全一致，
+ * 可以原样复用；仅 reserved-memory 沿用本机已验证能正常启动的布局
+ * （npu-pkt@0x81000000 / npu-ba@0x90c06800）。
  *
- * 固件来源：ClankerNPU（ClankerConstruction/ClankerNPU，
- *   SOC=AN7581 WIFI=MT7916）现编的 rv32 + data 一对。
+ * 分工（对方实测）：
+ *   B1 下行（PON→WiFi）：WED v1 TX，PPE → PSE port3 → WDMA → WED
+ *   B2 上行（WiFi→PON）：厂商 98K MT7916 RX-only NPU 固件 + hostadpt 环
  *
- * 内存布局依据原厂 QWRT 固件 DTB（见 reverse-out/board.dts）：
- *   npu-pkt @0x81000000  22MB   —— 与原厂同址
- *   npu-ba  @0x90c06800   2MB   —— 与原厂同址
- * 上游 en7581.dtsi 已占用 0x80000000(atf) / 0x84000000(npu-binary)
- * / 0x87000000(qdma0) / 0x89000000(qdma1)，0x81000000 空闲可安全占用。
+ * 与旧版本的差别：不再需要 airoha,legacy-wlan-mailbox，也不再走我们
+ * 自研的 402/405 mt76 补丁；RX 语义由 airoha,npu-mt7916-rx 触发。
  */
 
 / {
@@ -50,36 +38,58 @@
 	};
 };
 
-/*
- * NPU 节点：只追加两个内存区，其余保持上游默认。
- *
- * memory-region 顺序必须与 memory-region-names 对应；
- * 上游驱动用 of_reserved_mem_region_to_resource_byname() 按名字取，
- * 所以顺序不敏感，但保持 binary 在首位与原厂一致。
- */
 &npu {
 	status = "okay";
 
 	memory-region = <&npu_binary>, <&npu_pkt>, <&npu_ba>;
 	memory-region-names = "binary", "pkt", "ba";
 
-	/*
-	 * ClankerNPU 现编的 AN7581+MT7916(kite) 固件。
-	 * 上游驱动内置名 en7581_npu_rv32.bin 是 MT7992 通用版，
-	 * 不含 kite 数据通路，必须显式指定这一对。
-	 * data 进 NPU 局部 SRAM，rv32 进 npu-binary 区。
-	 */
+	/* 厂商 98K RX-only 固件（files/lib/firmware/airoha/ 随镜像打包） */
 	firmware-name = "airoha/en7581_MT7916_npu_rv32.bin",
 			"airoha/en7581_MT7916_npu_data.bin";
 
-	/*
-	 * 刻意【不】设 airoha,legacy-wlan-mailbox。
-	 *
-	 * 该属性让 401 补丁走 legacy 脉冲（BOOT_CONFIG=0 + TRIGGER 0->1，
-	 * 不写 MIB10/BOOT_BASE）。2026-11-26 实机 devmem 实测：这种启动
-	 * 方式下 NPU 四核 PC 全为 0，固件从未运行；补上 MIB10 + BOOT_BASE
-	 * 后一秒内 MIB31 变为 0xcccccccc、核 PC 落入固件镜像，且手搓
-	 * WLAN_FUNC_GET_WAIT_NPU_VERSION 立即返回 DONE + status 0。
-	 * 即邮箱 ABI 与主线一致，缺的只是 bring-up 等待（404 补丁）。
-	 */
+	/* 启用 MT7916 RX-only 模式：hostadpt 环接管 WiFi 接收 */
+	airoha,npu-mt7916-rx;
+};
+
+&{/soc} {
+	wdma0: wdma@1fa06000 {
+		compatible = "airoha,an7581-wdma";
+		reg = <0x0 0x1fa06000 0x0 0x400>;
+		interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;
+		status = "okay";
+	};
+
+	wdma1: wdma@1fa06400 {
+		compatible = "airoha,an7581-wdma";
+		reg = <0x0 0x1fa06400 0x0 0x400>;
+		interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>;
+		status = "okay";
+	};
+
+	wed0: wed@1fa02000 {
+		compatible = "airoha,an7581-wed";
+		reg = <0x0 0x1fa02000 0x0 0xb00>;
+		interrupts = <GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>;
+		airoha,wdma = <&wdma0>;
+		airoha,wed-id = <0>;
+		status = "okay";
+	};
+
+	wed1: wed@1fa03000 {
+		compatible = "airoha,an7581-wed";
+		reg = <0x0 0x1fa03000 0x0 0xb00>;
+		interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;
+		airoha,wdma = <&wdma1>;
+		airoha,wed-id = <1>;
+		status = "okay";
+	};
+};
+
+&eth {
+	airoha,wed = <&wed0>, <&wed1>;
 };
