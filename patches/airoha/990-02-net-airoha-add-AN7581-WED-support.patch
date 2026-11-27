@@ -1732,10 +1732,14 @@
 +	return hw && hw->airoha == eth && READ_ONCE(hw->wed_dev) != NULL;
 +}
 +
-+/* WED v1 leaves wireless receive processing on the CPU. */
++/*
++ * WED v1 leaves wireless receive processing on the CPU, so this stays a stub.
++ * Kernel 6.18 的 mtk_wed_ops.ppe_check 带 5 个参数（原实现只写到 4 个）：
++ * reason/hash/wcid 全部由 WED v2/v3 的 RX 通路消费，v1 用不到。
++ */
 +static void
 +mtk_wed_ppe_check(struct mtk_wed_device *dev, struct sk_buff *skb,
-+		  u32 reason, u32 hash)
++		  u32 reason, u32 hash, u16 wcid)
 +{
 +}
 +

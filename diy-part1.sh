@@ -159,23 +159,31 @@ if [ "$ADD_FTTR" = "true" ] && [ "$FTTR_PROFILE" = "h3c_hm2004-du" ]; then
   #   optical state is unconfirmed; ... explicit reload required）。
   # 补丁只比较本函数拥有的 TX/FEC 两位，其余位留给硬件。
   # ---------------------------------------------------------
-  FTTR_FIX_PATCH="$GITHUB_WORKSPACE/patches/fttr/0001-fmcs-only-compare-owned-gpon-control-bits.patch"
-  if [ -f "$FTTR_FIX_PATCH" ]; then
-    # 冻结分支 hm2004-stable 已并入该修复。照打的话 patch 会报
-    # "Reversed (or previously applied)" 并交互式询问、最终丢 hunk，
-    # 于是每次构建都冒一条误导性的「FTTR 补丁应用失败」告警。
-    # 先用 -R --dry-run 判定是否已在内，再决定打不打。
-    if patch -p1 -R --dry-run -s -d "$FTTR_FEED_TMP" < "$FTTR_FIX_PATCH" >/dev/null 2>&1; then
-      echo "✅ FTTR GPON 控制位校验补丁已在分支内（hm2004-stable 已含），无需重复应用"
-    elif patch -p1 -s -N -f --no-backup-if-mismatch -d "$FTTR_FEED_TMP" < "$FTTR_FIX_PATCH"; then
-      echo "✅ FTTR GPON 控制位校验补丁已应用"
-    else
-      echo "::warning::FTTR 补丁应用失败（上游可能已改），继续构建未打补丁的版本"
+  # 该修复已随 mayipashu/openwrt-fttr@da0f65b 并入 hm2004-stable，且实现
+  # 比本地补丁更宽（重试 + 只比较自有 bit + 轮询失败不再 fail_closed），
+  # 本地补丁已无法反向前置判定，硬打只会留 .rej 并冒假告警。
+  #
+  # 改为「特征断言」：分支里必须能看到这些标记，否则说明上游把修复回退
+  # 或改了实现，此时直接报错停下，而不是悄悄产出一个光口会自锁的固件。
+  FMCS_RS="$FTTR_FEED_TMP/fttr/src/src/platform/h3c_hm2004_du/fmcs.rs"
+  OPT_OWNER_RS="$FTTR_FEED_TMP/fttr/src/src/controller/optical_owner.rs"
+  if [ -f "$FMCS_RS" ]; then
+    miss=""
+    grep -q "GPON_CONTROL_READBACK_ATTEMPTS" "$FMCS_RS" || miss="$miss fmcs.rs:重试常量"
+    grep -q "let owned = GPON_TX | GPON_FEC" "$FMCS_RS" || miss="$miss fmcs.rs:只比自有位"
+    if [ -f "$OPT_OWNER_RS" ]; then
+      grep -q "a_poll_failure_keeps_the_line_up" "$OPT_OWNER_RS" || miss="$miss optical_owner.rs:轮询失败不关光口"
     fi
+    if [ -n "$miss" ]; then
+      echo "::error::FTTR 光口修复缺失（hm2004-stable 可能被回退）：$miss"
+      echo "         该修复让 FPGA 就绪前的周期性读回失败不再 fail_closed 关闭下行光口，"
+      echo "         缺失会直接导致 FTTR 从机全掉线。请确认分支含 da0f65b。"
+      exit 1
+    fi
+    echo "✅ FTTR 光口修复已在分支内（da0f65b），跳过本地补丁"
   else
-    echo "::warning::未找到 FTTR 补丁：$FTTR_FIX_PATCH"
+    echo "::warning::未找到 $FMCS_RS，跳过 FTTR 光口修复校验"
   fi
-
   # openwrt-fttr 硬 include 了 feeds/packages/lang/rust/rust-package.mk，
   # 这个文件不在的话 dump 直接失败、包静默不进索引。
   # 与其等到 defconfig 把它剔掉才发现，不如在这里就报错退出。
