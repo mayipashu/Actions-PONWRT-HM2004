@@ -281,6 +281,31 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
   fi
 
   # ---------------------------------------------------------
+  # 内核 Kconfig 符号必须写进「目标 config」，不能只写 .config
+  #
+  # target/linux/airoha/an7581/config-6.18 是内核配置的基座。工作流追加到
+  # TOPDIR/.config 的 CONFIG_NET_* 会在 kernel_oldconfig 阶段被基座里的
+  # `# CONFIG_NET_VENDOR_MEDIATEK is not set` 覆盖掉，而 952 只改 Kconfig
+  # 依赖（ARCH_AIROHA 可选中），并不会替我们把符号选中。
+  # 首次构建实测后果：CONFIG_NET_MEDIATEK_SOC_WED 未生效 →
+  # struct mtk_wed_device 的成员全被 #ifdef 摘掉 →
+  # mt7915/main.c 报 'has no member named wdma_idx'，mt76 整个包编译失败。
+  # ---------------------------------------------------------
+  KCONFIG="target/linux/airoha/an7581/config-6.18"
+  if [ -f "$KCONFIG" ]; then
+    sed -i 's/^# CONFIG_NET_VENDOR_MEDIATEK is not set$/CONFIG_NET_VENDOR_MEDIATEK=y/' "$KCONFIG"
+    sed -i 's/^# CONFIG_NET_MEDIATEK_SOC_WED is not set$/CONFIG_NET_MEDIATEK_SOC_WED=y/' "$KCONFIG"
+    grep -q '^CONFIG_NET_VENDOR_MEDIATEK=y$' "$KCONFIG" || \
+      echo 'CONFIG_NET_VENDOR_MEDIATEK=y' >> "$KCONFIG"
+    grep -q '^CONFIG_NET_MEDIATEK_SOC_WED=y$' "$KCONFIG" || \
+      echo 'CONFIG_NET_MEDIATEK_SOC_WED=y' >> "$KCONFIG"
+    echo "✅ 内核目标配置已启用 WED："
+    grep -nE "NET_VENDOR_MEDIATEK|NET_MEDIATEK_SOC_WED|NET_AIROHA_NPU" "$KCONFIG"
+  else
+    echo "::warning::未找到内核目标配置 $KCONFIG（WED 符号将不生效）"
+  fi
+
+  # ---------------------------------------------------------
   # 内核补丁：AN7581 WED v1 TX + MT7916 NPU RX（厂商 98K 固件）
   #
   # 来源：wuziwei/ponwrt-ZN504-HG5585F 分支
