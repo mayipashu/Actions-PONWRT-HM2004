@@ -307,15 +307,15 @@ if [ "${ADD_NPU_OFFLOAD:-false}" = "true" ]; then
     # 编译还没开始就挂。该菜单下只有这三个符号，全部给成明确答案：
     #   NET_MEDIATEK_SOC 保持关（952 只为 ops-only 导出 mtk_soc_wed_ops），
     #   NET_MEDIATEK_STAR_EMAC 本机不用。
-    for sym in NET_MEDIATEK_SOC NET_MEDIATEK_STAR_EMAC; do
-      if grep -q "^${sym}=y$" "$KCONFIG"; then
-        sed -i "s/^${sym}=y$/# ${sym} is not set/" "$KCONFIG"
-      elif ! grep -q "^# ${sym} is not set$" "$KCONFIG"; then
+    # ⚠ 必须带 CONFIG_ 前缀：kconfig 只认 "# CONFIG_X is not set" 这种写法，
+    #   写成 "# X is not set" 会被无视，符号照样是 (NEW) 交互提示（踩过一次）。
+    for sym in CONFIG_NET_MEDIATEK_SOC CONFIG_NET_MEDIATEK_STAR_EMAC; do
+      sed -i "s/^${sym}=[ym]$/# ${sym} is not set/" "$KCONFIG"
+      grep -qxF "# ${sym} is not set" "$KCONFIG" || \
         echo "# ${sym} is not set" >> "$KCONFIG"
-      fi
     done
     echo "✅ 内核目标配置已启用 WED："
-    grep -nE "NET_VENDOR_MEDIATEK|NET_MEDIATEK_SOC|NET_AIROHA_NPU" "$KCONFIG"
+    grep -nE "NET_VENDOR_MEDIATEK|NET_MEDIATEK_SOC|NET_MEDIATEK_STAR_EMAC|NET_AIROHA_NPU" "$KCONFIG"
   else
     echo "::warning::未找到内核目标配置 $KCONFIG（WED 符号将不生效）"
   fi
