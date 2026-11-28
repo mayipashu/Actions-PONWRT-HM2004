@@ -496,6 +496,27 @@ jobs:
           R1=$(probe "${PRIVATE_REPO}" "${PRIVATE_REPO_BRANCH}")
           R2=$(probe "${FTTR_LUCI_REPO}" "${FTTR_LUCI_BRANCH}")
 
+          # 构建期还会从这里取两个第三方依赖（rumqtt 是 cargo git 依赖，
+          # fluent 是 diy-part1.sh 克隆的主题）。它们不属于上面两个变量，
+          # 但一样会让构建在几十分钟后才炸 —— 这里一并探测，缺失就当场失败。
+          # ⚠ 踩过的坑：fork 创建是异步的，API 返回 202 后仓库可能并不存在，
+          #   git ls-remote 甚至能短暂成功，之后被 GitHub 回滚删掉。
+          #   结果是编到一半 cargo 报 “failed to authenticate”/“Repository not found”。
+          DEPS_OK=true
+          for dep in "mayipashu/rumqtt:main" "mayipashu/luci-theme-fluent:main"; do
+            d_repo="${dep%%:*}"; d_br="${dep##*:}"
+            if git ls-remote --exit-code --heads "https://github.com/${d_repo}" \
+                 "refs/heads/${d_br}" >/dev/null 2>&1; then
+              echo "  ✅ ${d_repo} (分支 ${d_br}) —— 依赖可用" >&2
+            else
+              echo "::error::依赖仓库 ${d_repo} 的 ${d_br} 分支匿名不可读。fork 可能没建成被回滚，先补建再编，否则会在编译中途失败。" >&2
+              DEPS_OK=false
+            fi
+          done
+          if [ "$DEPS_OK" != true ]; then
+            exit 1
+          fi
+
           if [ "$R1" = "private" ] || [ "$R2" = "private" ]; then
             NEED=true
           fi

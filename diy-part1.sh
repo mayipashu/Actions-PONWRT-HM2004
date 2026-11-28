@@ -415,7 +415,12 @@ fi
 #   必须把子目录拷出来，否则 buildroot 扫不到 Makefile
 if [ "$ADD_FLUENT" = "true" ] || [ "$ADD_FLUENT_LITE" = "true" ] || [ "$ADD_FLUENT_DASH" = "true" ]; then
   FLUENT_TMP="$(mktemp -d)/fluent"
-  clone https://github.com/mayipashu/luci-theme-fluent "$FLUENT_TMP" main
+  # ⚠ 必须致命：原先 clone 失败后靠下面的 continue 兜着，主题会静默缺失，
+  #   而 config 里 luci-theme-fluent=y 会在 defconfig 被剔除，装机才发现没主题。
+  if ! clone https://github.com/mayipashu/luci-theme-fluent "$FLUENT_TMP" main; then
+    echo "::error::luci-theme-fluent 克隆失败（fork 被删 / 分支改名？）—— 主题会缺失，不继续"
+    exit 1
+  fi
 
   for p in luci-theme-fluent luci-theme-fluent-lite luci-mod-fluentdashboard; do
     case "$p" in
@@ -423,7 +428,10 @@ if [ "$ADD_FLUENT" = "true" ] || [ "$ADD_FLUENT_LITE" = "true" ] || [ "$ADD_FLUE
       luci-theme-fluent-lite)   [ "$ADD_FLUENT_LITE" = "true" ] || continue ;;
       luci-mod-fluentdashboard) [ "$ADD_FLUENT_DASH" = "true" ] || continue ;;
     esac
-    [ -d "$FLUENT_TMP/package/$p" ] || { echo "::error::$p 不存在"; continue; }
+    [ -d "$FLUENT_TMP/package/$p" ] || {
+      echo "::error::$p 不在仓库的 package/ 子目录下（上游改结构了？）"
+      exit 1
+    }
     rm -rf "$PKG_DIR/$p"
     cp -a "$FLUENT_TMP/package/$p" "$PKG_DIR/$p"
     echo "✅ 已拷贝: $p"
