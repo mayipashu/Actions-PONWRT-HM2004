@@ -91,7 +91,9 @@ PPE 由 CPU 直接编程**，不启用 NPU 固件接收路径。
 
 - PON 驱动与用户态（`airoha-pond` / `airoha-ponctl` / `luci-app-pon`）、IGMP Proxy、`luci-app-iptv` 等
 - Airoha SoC 状态页（NPU/CPU/Frame Engine/PPE）、`luci-app-natmode`、`luci-app-pon-status`
-- Fluent 主题、时区 Asia/Shanghai、5G WiFi 国家码 CN
+- **Argon 主题**（`luci-theme-fluent` 在 config 里是关闭的，`diy-part1.sh` 的
+  `ADD_FLUENT=true` 仍会克隆但不会编进固件——按本仓库自己的规则，两处应当保持一致）、
+  时区 Asia/Shanghai、5G WiFi 国家码 CN
 
 ## 工作流
 
