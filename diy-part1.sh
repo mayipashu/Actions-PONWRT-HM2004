@@ -124,7 +124,7 @@ fi
 
 # =========================================================
 # h3c-fmcs / openwrt-fttr / h3c-fmcs-firmware —— FTTR 后端三件套 ★HM2004-DU 专属
-# 源：LazuliKao/openwrt-fttr（私有仓库，作者已共享；可用 PRIVATE_REPO 覆盖）
+# 源：mayipashu/openwrt-fttr 的 hm2004-stable（自己的 fork，可用 PRIVATE_REPO 覆盖）
 # ⚠ 这里必须用「裸 URL」：凭证由 workflow 的 GIT_ASKPASS 在认证时回调注入，
 #   千万别拼 token —— clone 的 echo 会把它打进日志。
 # ⚠ 该仓库是 feed 形态（根目录直接是包目录），拷进 package/custom/ 即可。
@@ -142,8 +142,11 @@ fi
 # =========================================================
 if [ "$ADD_FTTR" = "true" ] && [ "$FTTR_PROFILE" = "h3c_hm2004-du" ]; then
   # 仓库与分支由 workflow 注入，本地手工跑时回退到下面的默认值
-  FTTR_FEED_URL="https://github.com/${PRIVATE_REPO:-LazuliKao/openwrt-fttr}"
-  FTTR_FEED_BRANCH="${PRIVATE_REPO_BRANCH:-main}"
+  # 默认取自己的 fork，不再直接跟上游：上游主线曾把已经修好的两个问题带回来
+  # （GPON 控制字严格读回比较、周期轮询失败即 fail_closed 关下行光），
+  # 详见 hm2004-stable 上的 c72cb6b / da0f65b 两个提交。
+  FTTR_FEED_URL="https://github.com/${PRIVATE_REPO:-mayipashu/openwrt-fttr}"
+  FTTR_FEED_BRANCH="${PRIVATE_REPO_BRANCH:-hm2004-stable}"
   FTTR_FEED_TMP="$(mktemp -d)/openwrt-fttr"
   if ! clone "$FTTR_FEED_URL" "$FTTR_FEED_TMP" "$FTTR_FEED_BRANCH"; then
     echo "::error::openwrt-fttr 拉取失败：${FTTR_FEED_URL} (分支 ${FTTR_FEED_BRANCH})，kmod-h3c-fmcs / openwrt-fttr / h3c-fmcs-firmware 会被 defconfig 剔除；luci-app-fttr 因依赖 +openwrt-fttr 也会被连带剔除"
@@ -159,7 +162,8 @@ if [ "$ADD_FTTR" = "true" ] && [ "$FTTR_PROFILE" = "h3c_hm2004-du" ]; then
   #   optical state is unconfirmed; ... explicit reload required）。
   # 补丁只比较本函数拥有的 TX/FEC 两位，其余位留给硬件。
   # ---------------------------------------------------------
-  # 该修复已随 mayipashu/openwrt-fttr@da0f65b 并入 hm2004-stable，且实现
+  # 该修复已随 mayipashu/openwrt-fttr 并入 hm2004-stable（两个修复提交
+  # c72cb6b 只比自有位、da0f65b 轮询失败不关光口，现位于 b214e04 之上），且实现
   # 比本地补丁更宽（重试 + 只比较自有 bit + 轮询失败不再 fail_closed），
   # 本地补丁已无法反向前置判定，硬打只会留 .rej 并冒假告警。
   #
@@ -177,10 +181,10 @@ if [ "$ADD_FTTR" = "true" ] && [ "$FTTR_PROFILE" = "h3c_hm2004-du" ]; then
     if [ -n "$miss" ]; then
       echo "::error::FTTR 光口修复缺失（hm2004-stable 可能被回退）：$miss"
       echo "         该修复让 FPGA 就绪前的周期性读回失败不再 fail_closed 关闭下行光口，"
-      echo "         缺失会直接导致 FTTR 从机全掉线。请确认分支含 da0f65b。"
+      echo "         缺失会直接导致 FTTR 从机全掉线。请确认 hm2004-stable 含这两个修复提交。"
       exit 1
     fi
-    echo "✅ FTTR 光口修复已在分支内（da0f65b），跳过本地补丁"
+    echo "✅ FTTR 光口修复已在分支内，跳过本地补丁"
   else
     echo "::warning::未找到 $FMCS_RS，跳过 FTTR 光口修复校验"
   fi
@@ -231,7 +235,7 @@ fi
 
 # =========================================================
 # luci-app-fttr —— FTTR 管理界面（网络 → FTTR）★HM2004-DU 专属
-# 源：LazuliKao/luci-app-fttr 的 package 分支（公开仓库，CI 生成的完整
+# 源：mayipashu/luci-app-fttr 的 package 分支（自己的 fork，CI 生成的完整
 #     OpenWrt 包：根目录直接是 Makefile + htdocs/ + po/ + root/）。
 # 2026-11-08 起上游把构建产物发布到该分支，Makefile 不再用
 # PKG_SOURCE_URL / PKG_HASH 下载 nightly tarball —— 前端 JS 已随包提交，
@@ -250,7 +254,7 @@ fi
 # =========================================================
 if [ "$ADD_FTTR" = "true" ] && [ "$ADD_FTTR_LUCI" = "true" ] && [ "$FTTR_PROFILE" = "h3c_hm2004-du" ]; then
   # 用独立变量名，不与 workflow 里指向「源码仓 main 分支」的 FTTR_LUCI_* 冲突
-  FTTR_PKG_REPO="${FTTR_PKG_REPO:-LazuliKao/luci-app-fttr}"
+  FTTR_PKG_REPO="${FTTR_PKG_REPO:-mayipashu/luci-app-fttr}"
   FTTR_PKG_BRANCH="${FTTR_PKG_BRANCH:-package}"
   FTTR_TMP="$(mktemp -d)/fttr"
   if ! clone "https://github.com/${FTTR_PKG_REPO}" "$FTTR_TMP" "$FTTR_PKG_BRANCH"; then
