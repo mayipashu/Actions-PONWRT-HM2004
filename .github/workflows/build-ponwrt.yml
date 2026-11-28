@@ -175,7 +175,7 @@ on:
         required: false
         default: 'hm2004-stable'
       npu_offload:
-        description: 'WiFi→PON 硬件转发（WED/NPU），仅 h3c_hm2004-du。实验性：注入 MT7916 NPU 固件 + DTS 叠加层'
+        description: 'WiFi→PON 硬件转发，仅 h3c_hm2004-du。注入 WED v1 TX 卸载 + PPE 由 CPU 直接编程的补丁（不启 NPU 固件接收路径）；不传则走官方无卸载路径'
         required: false
         default: 'false'
         type: choice
@@ -892,10 +892,12 @@ jobs:
 
           # =========================================================
           # 关键包校验：defconfig 会把 feeds 里不存在的包静默剔除，
-          # 这里显式确认 PON 核心链路还在，否则编出来光口不通
+          # 这里显式确认 PON 核心链路还在，否则编出来光口不通。
+          # sshpass 不是 PON 包，但列进来同理：它是日常脚本里 ssh/scp 带密码
+          # 用的，被静默剔除后要装机才发现，所以一并当关键包看待。
           # =========================================================
           MISSING=""
-          for p in kmod-airoha-xpon kmod-airoha-pon-frontend airoha-pond airoha-ponctl luci-app-pon; do
+          for p in kmod-airoha-xpon kmod-airoha-pon-frontend airoha-pond airoha-ponctl luci-app-pon sshpass; do
             if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
               MISSING="$MISSING $p"
             fi
@@ -904,7 +906,7 @@ jobs:
             echo "::error::以下关键包在 defconfig 后未启用，检查 feeds 是否完整:$MISSING"
             exit 1
           fi
-          echo "✅ PON 关键包校验通过"
+          echo "✅ 关键包校验通过（PON 链路 + sshpass）"
 
           # =========================================================
           # 状态插件校验：第三方包若在 package/custom 里缺失，
@@ -973,7 +975,7 @@ jobs:
             tinc frpc luci-app-frpc n2n \
             samba4-server luci-app-samba4 \
             filebrowser luci-app-filebrowser-go luci-i18n-filebrowser-go-zh-cn \
-            openssh-sftp-server \
+            openssh-sftp-server sshpass \
             syncthing luci-app-syncthing luci-i18n-syncthing-zh-cn \
             watchcat luci-app-watchcat luci-i18n-watchcat-zh-cn \
             luci-app-mesh \
