@@ -36,10 +36,13 @@ env:
   OPT_CRYPTO_ARM64CE: ${{ github.event.inputs.opt_arm64ce == '1' && '1' || '0' }}
   OPT_CRYPTO_CHACHA:  ${{ github.event.inputs.opt_chacha  == '1' && '1' || '0' }}
   OPT_CRYPTO_EIP93:   ${{ github.event.inputs.opt_eip93   == '1' && '1' || '0' }}
-  PRIVATE_REPO: ${{ github.event.inputs.private_repo || 'LazuliKao/openwrt-fttr' }}
-  PRIVATE_REPO_BRANCH: ${{ github.event.inputs.private_repo_branch || 'main' }}
-  FTTR_LUCI_REPO: ${{ github.event.inputs.fttr_luci_repo || 'LazuliKao/luci-app-fttr' }}
-  FTTR_LUCI_BRANCH: ${{ github.event.inputs.fttr_luci_branch || 'main' }}
+  # 默认取自己的 fork，不再直连上游：上游 main 会把两个已修好的光口问题带回来
+  # （GPON 控制字严格读回比较、周期轮询失败即 fail_closed 关下行光），详见
+  # mayipashu/openwrt-fttr hm2004-stable 上的 c72cb6b / da0f65b。
+  PRIVATE_REPO: ${{ github.event.inputs.private_repo || 'mayipashu/openwrt-fttr' }}
+  PRIVATE_REPO_BRANCH: ${{ github.event.inputs.private_repo_branch || 'hm2004-stable' }}
+  FTTR_LUCI_REPO: ${{ github.event.inputs.fttr_luci_repo || 'mayipashu/luci-app-fttr' }}
+  FTTR_LUCI_BRANCH: ${{ github.event.inputs.fttr_luci_branch || 'package' }}
   # WiFi→PON 硬件转发（WED/NPU）实验开关
   ADD_NPU_OFFLOAD: ${{ github.event.inputs.npu_offload || 'false' }}
   # NPU legacy WLAN mailbox ABI（MT7916 专用固件走原厂 boot 流程）
@@ -162,16 +165,16 @@ on:
       private_repo:
         description: '拉取私有仓库（FTTR 三件套来源，需凭证）'
         required: false
-        default: 'LazuliKao/openwrt-fttr'
+        default: 'mayipashu/openwrt-fttr'
         type: choice
         options:
-          - LazuliKao/openwrt-fttr
           - mayipashu/openwrt-fttr
+          - LazuliKao/openwrt-fttr
           - none
       private_repo_branch:
-        description: '私有仓库分支'
+        description: '私有仓库分支（hm2004-stable 含光口修复，勿改回 main）'
         required: false
-        default: 'main'
+        default: 'hm2004-stable'
       npu_offload:
         description: 'WiFi→PON 硬件转发（WED/NPU），仅 h3c_hm2004-du。实验性：注入 MT7916 NPU 固件 + DTS 叠加层'
         required: false
