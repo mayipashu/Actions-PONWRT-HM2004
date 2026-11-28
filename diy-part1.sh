@@ -414,7 +414,7 @@ fi
 #   必须把子目录拷出来，否则 buildroot 扫不到 Makefile
 if [ "$ADD_FLUENT" = "true" ] || [ "$ADD_FLUENT_LITE" = "true" ] || [ "$ADD_FLUENT_DASH" = "true" ]; then
   FLUENT_TMP="$(mktemp -d)/fluent"
-  clone https://github.com/LazuliKao/luci-theme-fluent "$FLUENT_TMP" main
+  clone https://github.com/mayipashu/luci-theme-fluent "$FLUENT_TMP" main
 
   for p in luci-theme-fluent luci-theme-fluent-lite luci-mod-fluentdashboard; do
     case "$p" in
@@ -907,7 +907,7 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
     # 链条上任一节不在树里，defconfig 都会静默把整条 FTTR 剔掉 —— 与其编出
     # 一个没有 FTTR 界面的固件还不易察觉，不如在这里直接报错。
     # 前者最常见原因是缺 rust-package.mk；后者受 @(TARGET_airoha_an7581) 限制。
-    # 界面包来自 LazuliKao/luci-app-fttr 的 package 分支，前端 JS 已随包
+    # 界面包来自 mayipashu/luci-app-fttr 的 package 分支，前端 JS 已随包
     # 提交，编译不联网；后端三件套仍由私有 feed 提供。
     # =========================================================
     if [ "$ADD_FTTR_TOOLS" = "true" ] &&

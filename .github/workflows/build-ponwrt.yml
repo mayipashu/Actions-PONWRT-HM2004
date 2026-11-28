@@ -169,7 +169,6 @@ on:
         type: choice
         options:
           - mayipashu/openwrt-fttr
-          - LazuliKao/openwrt-fttr
           - none
       private_repo_branch:
         description: '私有仓库分支（hm2004-stable 含光口修复，勿改回 main）'

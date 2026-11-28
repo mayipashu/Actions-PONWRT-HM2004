@@ -27,10 +27,14 @@ workflow 的 `soc` / `profile` 已固定默认值，**手动触发即可，不�
 | `openwrt-fttr` | fttrd 控制器 + fttrctl（Rust 包） |
 | `luci-app-fttr` (+ zh-cn) | 网络 → FTTR 管理界面 |
 
-- 后端三件套来自私有仓库 [`LazuliKao/openwrt-fttr`](https://github.com/LazuliKao/openwrt-fttr)
-  （作者已共享权限），构建时需要 Secrets 里的 `PRIVATE_REPO_TOKEN` 才能拉取；
-  界面包来自公开的 [`LazuliKao/luci-app-fttr`](https://github.com/LazuliKao/luci-app-fttr) 的 `package` 分支。
-- 私有仓库可在触发时用 `private_repo` 输入切换（`LazuliKao/openwrt-fttr` / `mayipashu/openwrt-fttr` / `none`）。
+- 后端三件套来自自己的 fork [`mayipashu/openwrt-fttr`](https://github.com/mayipashu/openwrt-fttr)
+  的 `hm2004-stable` 分支（公开仓库，无需凭证）；界面包来自
+  [`mayipashu/luci-app-fttr`](https://github.com/mayipashu/luci-app-fttr) 的 `package` 分支。
+  主题与 MQTT 依赖同样已内化为 `mayipashu/luci-theme-fluent`、`mayipashu/rumqtt`。
+- **不再同步上游。** 上游 `LazuliKao/*` 已与我们分叉：它始终没修我们踩过的两个
+  下行光口问题（GPON 控制字严格读回比较、周期轮询失败即关下行光），跟着走就是
+  反复把坑带回来。理由与规则见 `mayipashu/openwrt-fttr` 的 `FORK-POLICY.md`。
+- `private_repo` 输入只用于在 `mayipashu/openwrt-fttr` 与 `none` 之间切换。
 
 ### 预装插件（`configs/h3c_hm2004-du.config` 第 19 节，全部编进固件，刷完免安装）
 
@@ -78,7 +82,7 @@ workflow 的 `soc` / `profile` 已固定默认值，**手动触发即可，不�
 | `prebuilt_host` | `true` | `true` 用 runner 的 Go/Rust/LLVM，快 1.5~2.5 小时 |
 | `ignore_cache` | `false` | 平时保持 `false`；改源码树结构时才需要 `true` 强刷 |
 | `upload_release` | `true` | `false` 只留 Artifact 不发 Release |
-| `private_repo` | `LazuliKao/openwrt-fttr` | FTTR 私有仓库；`none` 会跳过 FTTR 全家桶 |
+| `private_repo` | `mayipashu/openwrt-fttr` | FTTR 仓库（自己的 fork）；`none` 会跳过 FTTR 全家桶 |
 | `fw_author` | `qwe` | 固件版本后缀作者名 |
 
 ## 自动滚动更新
@@ -139,7 +143,7 @@ key = `ponwrt-<源站>-<分支>-<SoC>-<prebuilt|source>-<上游提交号>`，恢
 | 症状 | 先看哪里 |
 |---|---|
 | `defconfig` 失败 / 关键包被剔除 | 日志里 `Validate configuration` 步骤；`diy-part1.sh` 末尾有包索引校验，缺包会直接报错 |
-| FTTR 包缺失 | `Setup private repo credentials` 步骤：确认 Secrets 有 `PRIVATE_REPO_TOKEN` 且对 `LazuliKao/openwrt-fttr` 有 Contents 读权限 |
+| FTTR 包缺失 | 先看 `diy-part1.sh` 的特征断言：分支缺光口修复会 `::error` 停下。仓库已是公开的 fork，正常不需要凭证 |
 | `rtp2httpd` 编译失败 | `packages/rtp2httpd/Makefile`：源码 commit、hash 与 `RTP2HTTPD_SOURCES` 清单要和 [mayipashu/rtp2httpd](https://github.com/mayipashu/rtp2httpd) 当前结构一致 |
 | 缓存命中却全量重编 | `prebuilt_host` / `source` / `branch` 是否和上次一致 |
 | 编译超时 | 用 `warm-cache.yml` 先预热工具链；或把不需要的插件在 config 里关掉 |
@@ -148,7 +152,7 @@ key = `ponwrt-<源站>-<分支>-<SoC>-<prebuilt|source>-<上游提交号>`，恢
 
 1. **只编译 `h3c_hm2004-du`**，workflow 默认值已固定为该机型
 2. **预装插件**（HomeProxy / Lucky / EasyTier / frpc / Samba4 / FileBrowser-go / openssh-sftp-server / Syncthing / Watchcat / tinc / n2n / Mesh+batman-adv+dawn+umdns / 时间控制 / 定制 rtp2httpd）
-3. **FTTR 私有仓库默认值**改为 `LazuliKao/openwrt-fttr`
+3. **FTTR 仓库默认值**改为 `mayipashu/openwrt-fttr@hm2004-stable`（原为 `LazuliKao/openwrt-fttr@main`）
 4. **lucky / easytier** 本体包也编进固件（上游只拉界面包，本体依赖会落空）；且二进制改为仓库内预置（`packages/prebuilt/`）：lucky 3.0.0、easytier 2.6.3-12a7b5a5，构建不再依赖上游 Release 下载
 5. `Validate configuration` 新增「定制预装插件」硬校验，缺任何一个直接失败，不会静默编出缺功能的固件
 6. 时间控制的 ACL / 配置节问题在构建期直接修复
