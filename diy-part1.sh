@@ -237,9 +237,10 @@ fi
 # luci-app-fttr —— FTTR 管理界面（网络 → FTTR）★HM2004-DU 专属
 # 源：mayipashu/luci-app-fttr 的 package 分支（自己的 fork，CI 生成的完整
 #     OpenWrt 包：根目录直接是 Makefile + htdocs/ + po/ + root/）。
-# 2026-11-08 起上游把构建产物发布到该分支，Makefile 不再用
-# PKG_SOURCE_URL / PKG_HASH 下载 nightly tarball —— 前端 JS 已随包提交，
-# 因此编译阶段不再联网取前端、也不存在 hash 失效问题。
+# 该分支是 CI 生成的完整包（根目录直接是 Makefile + htdocs/ + po/ + root/），
+# Makefile 不用 PKG_SOURCE_URL / PKG_HASH 下载 nightly tarball —— 前端 JS
+# 已随包提交，因此编译阶段不再联网取前端、也不存在 hash 失效问题。
+# 本仓库自 2026-11-28 起冻结上游、只认自己的 fork：不再从 LazuliKao 取任何东西。
 # ⚠ package 分支是 orphan + force-push 生成（每次只有 1 个 commit），
 #   必须用 --depth 1 每次重新 clone，不能复用旧目录。
 # ⚠ Makefile 里 LUCI_DEPENDS:=+luci-base +rpcd +openwrt-fttr，后端仍由
